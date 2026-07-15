@@ -189,8 +189,13 @@ export class WayfinderView extends ItemView {
       attr: { style: `width:${map.total ? Math.round((map.resolved / map.total) * 100) : 0}%` },
     });
 
-    this.addIconActions(head, map.issue.html_url);
-    head.addEventListener("click", () => new TicketModal(this.app, this.plugin, null, map).open());
+    this.addIconActions(head, map.issue.html_url, () =>
+      new TicketModal(this.app, this.plugin, null, map).open(),
+    );
+    head.addEventListener("click", () => {
+      this.collapsedOverride.set(map.issue.number, expanded);
+      this.render();
+    });
     this.attachHover(head, null, map);
 
     if (!expanded) return;
@@ -246,9 +251,20 @@ export class WayfinderView extends ItemView {
     }
   }
 
-  /** Small always-available actions on a card: ⧉ copy and ↗ open on GitHub. */
-  private addIconActions(card: HTMLElement, url: string): void {
+  /** Small always-available actions on a card: optional ⓘ details, ⧉ copy, ↗ GitHub. */
+  private addIconActions(card: HTMLElement, url: string, onInfo?: () => void): void {
     const actions = card.createDiv({ cls: "wf-actions" });
+    if (onInfo) {
+      const info = actions.createEl("button", {
+        cls: "wf-iconbtn",
+        attr: { "aria-label": "Show details" },
+      });
+      setIcon(info, "info");
+      info.addEventListener("click", (e) => {
+        e.stopPropagation();
+        onInfo();
+      });
+    }
     const copy = actions.createEl("button", {
       cls: "wf-iconbtn",
       attr: { "aria-label": "Copy /wayfinder command" },
@@ -404,7 +420,9 @@ export class WayfinderView extends ItemView {
       });
       card.createDiv({
         cls: "wf-hc-cta",
-        text: "Click for details + comments · ⧉ copies /wayfinder · ↗ opens GitHub",
+        text: ticket
+          ? "Click for details + comments · ⧉ copies /wayfinder · ↗ opens GitHub"
+          : "Click to expand/collapse · ⓘ details + comments · ⧉ copies /wayfinder",
       });
 
       const r = el.getBoundingClientRect();
