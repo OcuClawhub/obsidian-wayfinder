@@ -47,7 +47,9 @@
   border-radius: 5px; cursor: pointer; color: var(--text-muted);
 }
 .wf-refresh:hover { color: var(--text-normal); border-color: var(--text-faint); }
-.wf-refresh svg { width: 13px; height: 13px; }
+.wf-refresh svg { width: 15px; height: 15px; }
+.wf-t-frontier { --tc: #3fb950; }
+.wf-t-frontier .wf-stat-num { color: #3fb950; }
 
 /* ── orphans ── */
 .wf-orphans {
@@ -132,16 +134,18 @@
 }
 .wf-ticket:hover .wf-actions, .wf-mapcard:hover .wf-actions { opacity: 1; }
 .wf-iconbtn {
-  display: inline-flex; align-items: center; padding: 0.2rem;
-  background: var(--background-secondary); border: none; border-radius: 4px;
-  color: var(--text-faint); cursor: pointer; box-shadow: none;
+  display: inline-flex; align-items: center; padding: 0.32rem;
+  background: var(--background-secondary); border: none; border-radius: 5px;
+  color: var(--text-muted); cursor: pointer; box-shadow: none;
 }
 .wf-iconbtn:hover { color: var(--text-normal); background: var(--background-modifier-hover); }
-.wf-iconbtn svg { width: 13px; height: 13px; }
+.wf-iconbtn svg { width: 16px; height: 16px; }
 .wf-mapcard .wf-actions { position: static; margin-left: auto; align-self: flex-start; }
-/* touch devices: no hover, keep actions visible */
+/* touch devices: no hover — keep actions visible and give them finger-sized targets */
 @media (hover: none) {
-  .wf-actions { opacity: 1; }
+  .wf-actions { opacity: 1; gap: 0.3rem; }
+  .wf-iconbtn { padding: 0.5rem; }
+  .wf-iconbtn svg { width: 18px; height: 18px; }
 }
 
 /* ── list mode ── */

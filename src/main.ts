@@ -29,6 +29,38 @@ export default class WayfinderPlugin extends Plugin {
     return this.github.comments(issueNumber);
   }
 
+  /**
+   * Live-check an open, unclaimed ticket right before acting on it.
+   * Returns a warning string if it was claimed or resolved since the last
+   * sync (and patches the snapshot so the view updates), null when clear.
+   * Failures and slow responses (>2s) return null — never block the action.
+   */
+  async claimCheck(issueNumber: number): Promise<string | null> {
+    const snap = this.snapshot;
+    const cached = snap?.issues.find((i) => i.number === issueNumber);
+    if (!snap || !cached || cached.state !== "open" || cached.assignees.length > 0) return null;
+    try {
+      const fresh = await Promise.race([
+        this.github.issue(issueNumber),
+        new Promise<null>((resolve) => window.setTimeout(() => resolve(null), 2000)),
+      ]);
+      if (!fresh) return null;
+      let warning: string | null = null;
+      if (fresh.state === "closed") {
+        warning = `#${issueNumber} was resolved since the last sync`;
+      } else if (fresh.assignees.length > 0) {
+        warning = `#${issueNumber} was claimed by ${fresh.assignees.join(", ")} since the last sync`;
+      }
+      if (warning) {
+        snap.issues[snap.issues.indexOf(cached)] = fresh;
+        this.events.trigger("wayfinder:updated");
+      }
+      return warning;
+    } catch {
+      return null;
+    }
+  }
+
   copyCommand(url: string): void {
     const text = this.settings.copyTemplate.replace("{url}", url);
     void navigator.clipboard.writeText(text).then(
@@ -97,6 +129,7 @@ export default class WayfinderPlugin extends Plugin {
   /** Persist settings and, once edits settle, try a sync with the new values. */
   async saveSettings(): Promise<void> {
     await this.persist();
+    this.events.trigger("wayfinder:settings");
     if (this.settingsSyncTimer !== null) window.clearTimeout(this.settingsSyncTimer);
     this.settingsSyncTimer = window.setTimeout(() => {
       this.settingsSyncTimer = null;

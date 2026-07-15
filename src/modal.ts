@@ -10,7 +10,7 @@ export class TicketModal extends Modal {
     app: App,
     private plugin: WayfinderPlugin,
     private ticket: Ticket | null,
-    private map: MapTree,
+    private map: MapTree | null,
   ) {
     super(app);
   }
@@ -19,7 +19,7 @@ export class TicketModal extends Modal {
     this.comp.load();
     const { contentEl } = this;
     contentEl.addClass("wf-modal");
-    const issue = this.ticket ? this.ticket.issue : this.map.issue;
+    const issue = this.ticket ? this.ticket.issue : this.map!.issue;
 
     const head = contentEl.createDiv({ cls: "wf-modal-head" });
     const row = head.createDiv({ cls: "wf-row1" });
@@ -42,14 +42,15 @@ export class TicketModal extends Modal {
     const ghBtn = actions.createEl("button", { text: "Open on GitHub ↗" });
     ghBtn.addEventListener("click", () => window.open(issue.html_url, "_blank"));
 
-    if (!this.ticket) {
+    const map = this.map;
+    if (!this.ticket && map) {
       const prog = contentEl.createDiv({ cls: "wf-progress wf-modal-progress" });
-      prog.createSpan({ text: `${this.map.resolved} / ${this.map.total} tickets resolved` });
+      prog.createSpan({ text: `${map.resolved} / ${map.total} tickets resolved` });
       const bar = prog.createDiv({ cls: "wf-bar" });
       bar.createDiv({
         cls: "wf-bar-fill",
         attr: {
-          style: `width:${this.map.total ? Math.round((this.map.resolved / this.map.total) * 100) : 0}%`,
+          style: `width:${map.total ? Math.round((map.resolved / map.total) * 100) : 0}%`,
         },
       });
     }
@@ -106,7 +107,7 @@ export class TicketModal extends Modal {
   }
 
   private stateText(): string {
-    const issue = this.ticket ? this.ticket.issue : this.map.issue;
+    const issue = this.ticket ? this.ticket.issue : this.map!.issue;
     if (issue.state === "closed") return "✓ resolved";
     if (this.ticket?.frontier) return "● frontier — takeable now";
     if (this.ticket && this.ticket.openBlockers.length > 0) return "🔒 blocked";

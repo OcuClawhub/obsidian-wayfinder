@@ -45,20 +45,18 @@ export class GitHubClient {
       const batch = res.json as Record<string, unknown>[];
       for (const raw of batch) {
         if ("pull_request" in raw) continue;
-        issues.push({
-          number: raw.number as number,
-          title: raw.title as string,
-          state: raw.state as "open" | "closed",
-          body: (raw.body as string | null) ?? null,
-          labels: ((raw.labels as { name: string }[]) ?? []).map((l) => l.name),
-          assignees: ((raw.assignees as { login: string }[]) ?? []).map((a) => a.login),
-          html_url: raw.html_url as string,
-          updated_at: raw.updated_at as string,
-        });
+        issues.push(toRawIssue(raw));
       }
       if (batch.length < 100) break;
     }
     return issues;
+  }
+
+  /** Fetch a single issue fresh — used for pre-action claim checks. */
+  async issue(issueNumber: number): Promise<RawIssue | null> {
+    const res = await this.get(`/issues/${issueNumber}`);
+    if (res.status !== 200) return null;
+    return toRawIssue(res.json as Record<string, unknown>);
   }
 
   async blockedBy(issueNumber: number): Promise<number[]> {
@@ -88,6 +86,19 @@ export interface IssueComment {
   author: string;
   createdAt: string;
   body: string;
+}
+
+function toRawIssue(raw: Record<string, unknown>): RawIssue {
+  return {
+    number: raw.number as number,
+    title: raw.title as string,
+    state: raw.state as "open" | "closed",
+    body: (raw.body as string | null) ?? null,
+    labels: ((raw.labels as { name: string }[]) ?? []).map((l) => l.name),
+    assignees: ((raw.assignees as { login: string }[]) ?? []).map((a) => a.login),
+    html_url: raw.html_url as string,
+    updated_at: raw.updated_at as string,
+  };
 }
 
 /**
@@ -128,7 +139,7 @@ export async function fetchSnapshot(
 
   // Small concurrency pool — polite to the API, fast enough for ~60 tickets.
   const queue = [...stale];
-  const workers = Array.from({ length: 5 }, async () => {
+  const workers = Array.from({ length: 10 }, async () => {
     for (let issue = queue.shift(); issue; issue = queue.shift()) {
       deps[String(issue.number)] = {
         updatedAt: issue.updated_at,

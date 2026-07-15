@@ -1,4 +1,5 @@
-import { ItemView, Platform, WorkspaceLeaf, setIcon } from "obsidian";
+import { ItemView, Notice, Platform, WorkspaceLeaf, setIcon } from "obsidian";
+import type { RawIssue } from "./model";
 import type WayfinderPlugin from "./main";
 import { TicketModal } from "./modal";
 import {
@@ -47,31 +48,85 @@ export class WayfinderView extends ItemView {
     return "compass";
   }
 
+  private pollTimer: number | null = null;
+  private lastRenderKey: string | null = null;
+  private edgeRaf = 0;
+
   async onOpen(): Promise<void> {
-    this.registerEvent(this.plugin.events.on("wayfinder:updated", () => this.render()));
-    this.registerInterval(
-      window.setInterval(
-        () => void this.plugin.sync(false),
-        Math.max(0.5, this.plugin.settings.pollIntervalMinutes) * 60_000,
-      ),
-    );
+    this.registerEvent(this.plugin.events.on("wayfinder:updated", () => this.onDataUpdated()));
+    this.registerEvent(this.plugin.events.on("wayfinder:settings", () => this.startPolling()));
+    this.startPolling();
     this.render();
     void this.plugin.sync(false);
   }
 
   async onClose(): Promise<void> {
+    if (this.pollTimer !== null) window.clearInterval(this.pollTimer);
+    cancelAnimationFrame(this.edgeRaf);
     this.hoverCard?.remove();
     this.resizeObserver?.disconnect();
   }
 
+  private startPolling(): void {
+    if (this.pollTimer !== null) window.clearInterval(this.pollTimer);
+    this.pollTimer = window.setInterval(
+      () => void this.plugin.sync(false),
+      Math.max(0.5, this.plugin.settings.pollIntervalMinutes) * 60_000,
+    );
+    this.registerInterval(this.pollTimer);
+  }
+
+  /**
+   * Re-render only when the data actually changed; otherwise just refresh the
+   * sync-status text. A full render every poll would reset scroll and hover.
+   */
+  private onDataUpdated(): void {
+    const key = this.snapshotKey();
+    if (key === this.lastRenderKey) {
+      this.updateSyncStatus();
+      return;
+    }
+    this.render();
+  }
+
+  private snapshotKey(): string {
+    const s = this.plugin.snapshot;
+    const err = this.plugin.lastError ?? "";
+    if (!s) return `none|${err}|${this.plugin.syncing}`;
+    const issues = s.issues
+      .map((i) => `${i.number}:${i.updated_at}:${i.state}:${i.assignees.join(",")}`)
+      .join("|");
+    return `${err}|${issues}|${JSON.stringify(s.parents)}|${JSON.stringify(s.deps)}`;
+  }
+
+  private syncStatusText(): string {
+    const s = this.plugin.snapshot;
+    if (!s) return "";
+    const open = s.issues.filter((i) => i.state === "open").length;
+    const when = this.plugin.syncing ? "syncing…" : `synced ${relativeTime(s.fetchedAt)}`;
+    return `${s.issues.length} issues · ${open} open · ${when}`;
+  }
+
+  private updateSyncStatus(): void {
+    const el = this.contentEl.querySelector(".wf-sync-status");
+    if (el instanceof HTMLElement) el.setText(this.syncStatusText());
+  }
+
+  private scheduleEdges(): void {
+    cancelAnimationFrame(this.edgeRaf);
+    this.edgeRaf = requestAnimationFrame(() => this.drawAllEdges());
+  }
+
   private render(): void {
     const root = this.contentEl;
+    const scrollTop = root.scrollTop;
+    this.lastRenderKey = this.snapshotKey();
     root.empty();
     root.addClass("wayfinder-view");
     this.hoverCard?.remove();
     this.hoverCard = null;
     this.resizeObserver?.disconnect();
-    this.resizeObserver = new ResizeObserver(() => this.drawAllEdges());
+    this.resizeObserver = new ResizeObserver(() => this.scheduleEdges());
 
     const snapshot = this.plugin.snapshot;
     if (!snapshot) {
@@ -98,8 +153,9 @@ export class WayfinderView extends ItemView {
     if (model.orphans.length > 0) this.renderOrphans(root, model.orphans);
     for (const map of model.maps) this.renderMap(root, map);
 
+    root.scrollTop = scrollTop;
     // Edges need final geometry — draw after layout settles.
-    requestAnimationFrame(() => this.drawAllEdges());
+    this.scheduleEdges();
   }
 
   // ── tally bar ────────────────────────────────────────────────────────────
@@ -114,13 +170,18 @@ export class WayfinderView extends ItemView {
       stat.setAttr("aria-label", `${type}: ${tally.open} open of ${tally.total} total`);
     }
 
+    const takeable = model.maps.reduce(
+      (n, m) => n + m.tickets.filter((t) => t.frontier).length,
+      0,
+    );
+    const frontierStat = bar.createDiv({ cls: "wf-stat wf-t-frontier" });
+    frontierStat.createSpan({ cls: "wf-swatch" });
+    frontierStat.createSpan({ cls: "wf-stat-num", text: String(takeable) });
+    frontierStat.createSpan({ cls: "wf-stat-lbl", text: "takeable" });
+    frontierStat.setAttr("aria-label", `${takeable} tickets open, unblocked, and unclaimed`);
+
     const right = bar.createDiv({ cls: "wf-tally-right" });
-    const syncedAgo = this.plugin.syncing
-      ? "syncing…"
-      : `synced ${relativeTime(model.fetchedAt)}`;
-    right.createSpan({
-      text: `${model.totalIssues} issues · ${model.totalOpen} open · ${syncedAgo}`,
-    });
+    right.createSpan({ cls: "wf-sync-status", text: this.syncStatusText() });
     const modeBtn = right.createEl("button", {
       cls: "wf-refresh",
       attr: { "aria-label": this.mode === "tree" ? "Switch to list view" : "Switch to tree view" },
@@ -151,7 +212,9 @@ export class WayfinderView extends ItemView {
         cls: "wf-orphan-why",
         text: t.parent === null ? "no “Part of #N” line" : `parent #${t.parent} is not a map`,
       });
-      row.addEventListener("click", () => this.plugin.copyCommand(t.issue.html_url));
+      row.addEventListener("click", () =>
+        new TicketModal(this.app, this.plugin, t, null).open(),
+      );
     }
   }
 
@@ -189,7 +252,7 @@ export class WayfinderView extends ItemView {
       attr: { style: `width:${map.total ? Math.round((map.resolved / map.total) * 100) : 0}%` },
     });
 
-    this.addIconActions(head, map.issue.html_url, () =>
+    this.addIconActions(head, map.issue, () =>
       new TicketModal(this.app, this.plugin, null, map).open(),
     );
     head.addEventListener("click", () => {
@@ -251,8 +314,18 @@ export class WayfinderView extends ItemView {
     }
   }
 
-  /** Small always-available actions on a card: optional ⓘ details, ⧉ copy, ↗ GitHub. */
-  private addIconActions(card: HTMLElement, url: string, onInfo?: () => void): void {
+  /**
+   * Small always-available actions on a card: optional ⓘ details, ⧉ copy,
+   * ↗ GitHub. When `claimCheck` is set (takeable tickets), copy/open first
+   * verify against GitHub that the ticket wasn't claimed since the last sync;
+   * a warning notice replaces the action on first click, a repeat proceeds.
+   */
+  private addIconActions(
+    card: HTMLElement,
+    issue: RawIssue,
+    onInfo?: () => void,
+    claimCheck = false,
+  ): void {
     const actions = card.createDiv({ cls: "wf-actions" });
     if (onInfo) {
       const info = actions.createEl("button", {
@@ -265,6 +338,18 @@ export class WayfinderView extends ItemView {
         onInfo();
       });
     }
+
+    const guarded = async (action: () => void): Promise<void> => {
+      if (claimCheck) {
+        const warning = await this.plugin.claimCheck(issue.number);
+        if (warning) {
+          new Notice(`⚠ ${warning}`, 6000);
+          return;
+        }
+      }
+      action();
+    };
+
     const copy = actions.createEl("button", {
       cls: "wf-iconbtn",
       attr: { "aria-label": "Copy /wayfinder command" },
@@ -272,15 +357,21 @@ export class WayfinderView extends ItemView {
     setIcon(copy, "copy");
     copy.addEventListener("click", (e) => {
       e.stopPropagation();
-      this.plugin.copyCommand(url);
+      void guarded(() => this.plugin.copyCommand(issue.html_url));
     });
+
     const open = actions.createEl("a", {
       cls: "wf-iconbtn",
-      href: url,
+      href: issue.html_url,
       attr: { "aria-label": "Open on GitHub" },
     });
     setIcon(open, "external-link");
-    open.addEventListener("click", (e) => e.stopPropagation());
+    open.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (!claimCheck) return; // plain link navigation
+      e.preventDefault();
+      void guarded(() => window.open(issue.html_url, "_blank"));
+    });
   }
 
   private renderTicket(layerEl: HTMLElement, t: Ticket, map: MapTree, asRow = false): void {
@@ -313,7 +404,7 @@ export class WayfinderView extends ItemView {
       meta.setText("● open · takeable now");
     }
 
-    this.addIconActions(card, t.issue.html_url);
+    this.addIconActions(card, t.issue, undefined, t.frontier);
     card.addEventListener("click", () => new TicketModal(this.app, this.plugin, t, map).open());
     this.attachHover(card, t, map);
   }
