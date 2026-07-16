@@ -4,6 +4,8 @@ import {
   buildModel,
   blockerLabel,
   hasConflictingLabels,
+  issueKey,
+  mergeModels,
   modeOf,
   parentOf,
   wayfinderType,
@@ -185,6 +187,63 @@ test("buildModel sorts open maps newest first and closed maps last", () => {
     buildModel(syntheticSnapshot()).maps.map((map) => map.issue.number),
     [200, 100, 300, 250],
   );
+});
+
+test("issueKey distinguishes matching issue numbers across repositories", () => {
+  assert.equal(issueKey("owner/one", 42), "owner/one#42");
+  assert.notEqual(issueKey("owner/one", 42), issueKey("owner/two", 42));
+});
+
+test("buildModel stamps repository identity on maps and tickets", () => {
+  const model = buildModel(syntheticSnapshot());
+  const populatedMap = model.maps.find((map) => map.issue.number === 100);
+
+  assert.equal(model.maps[0].repo, "owner/repo");
+  assert.equal(populatedMap?.tickets[0].repo, "owner/repo");
+  assert.equal(model.orphans[0].repo, "owner/repo");
+});
+
+test("mergeModels sums tallies and orders maps and orphans across repositories", () => {
+  const first = buildModel(syntheticSnapshot());
+  const secondSnapshot = syntheticSnapshot();
+  secondSnapshot.repo = "another/repo";
+  secondSnapshot.fetchedAt = 456;
+  secondSnapshot.issues = [
+    issue(200, ["wayfinder:map"]),
+    issue(400, ["wayfinder:map"], { state: "closed" }),
+    issue(110, ["wayfinder:task"]),
+  ];
+  secondSnapshot.deps = { "110": { updatedAt: "", blockedBy: [] } };
+  secondSnapshot.parents = {};
+
+  const merged = mergeModels([first, buildModel(secondSnapshot)]);
+
+  assert.deepEqual(
+    merged.maps.map((map) => `${map.repo}#${map.issue.number}`),
+    [
+      "another/repo#200",
+      "owner/repo#200",
+      "owner/repo#100",
+      "another/repo#400",
+      "owner/repo#300",
+      "owner/repo#250",
+    ],
+  );
+  assert.deepEqual(
+    merged.orphans.map((ticket) => `${ticket.repo}#${ticket.issue.number}`),
+    ["owner/repo#111", "another/repo#110", "owner/repo#110"],
+  );
+  assert.deepEqual(merged.tallies, [
+    { type: "map", tally: { open: 3, total: 6 } },
+    { type: "grilling", tally: { open: 1, total: 1 } },
+    { type: "research", tally: { open: 1, total: 2 } },
+    { type: "prototype", tally: { open: 3, total: 3 } },
+    { type: "task", tally: { open: 6, total: 6 } },
+  ]);
+  assert.equal(merged.totalIssues, 20);
+  assert.equal(merged.totalOpen, 16);
+  assert.equal(merged.fetchedAt, 123);
+  assert.equal(mergeModels([]).fetchedAt, 0);
 });
 
 function syntheticSnapshot(): Snapshot {

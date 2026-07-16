@@ -1,5 +1,5 @@
 import { renderTicketCard, type TicketCardOptions } from "./cards";
-import type { MapTree, Snapshot } from "./model";
+import { issueKey, type MapTree, type Snapshot } from "./model";
 
 export function renderTree(
   section: HTMLElement,
@@ -7,9 +7,10 @@ export function renderTree(
   cardOptions: Omit<TicketCardOptions, "asRow">,
 ): HTMLElement {
   const scroller = section.createDiv({ cls: "wf-tree-scroll" });
-  scroller.dataset.mapNumber = String(map.issue.number);
+  scroller.dataset.mapKey = issueKey(map.repo, map.issue.number);
   const tree = scroller.createDiv({ cls: "wf-tree" });
   tree.dataset.mapNumber = String(map.issue.number);
+  tree.dataset.repo = map.repo;
   const svg = tree.createSvg("svg", { cls: "wf-edges" });
   svg.setAttr("aria-hidden", "true");
 
@@ -21,9 +22,9 @@ export function renderTree(
   return tree;
 }
 
-export function drawAllEdges(root: HTMLElement, snapshot: Snapshot | null): void {
+export function drawAllEdges(root: HTMLElement, snapshots: Record<string, Snapshot>): void {
   for (const tree of Array.from(root.querySelectorAll<HTMLElement>(".wf-tree"))) {
-    drawEdges(tree, snapshot);
+    drawEdges(tree, snapshots[tree.dataset.repo ?? ""] ?? null);
   }
 }
 

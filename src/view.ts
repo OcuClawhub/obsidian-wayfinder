@@ -2,27 +2,35 @@ import { ItemView, Notice, Platform, WorkspaceLeaf, setIcon } from "obsidian";
 import { addIconActions, type TicketCardOptions } from "./cards";
 import { HoverCards, relativeTime } from "./hover";
 import { renderList } from "./list";
-import type { RawIssue } from "./model";
 import type WayfinderPlugin from "./main";
 import type { TakeableVerification } from "./main";
 import { TicketModal } from "./modal";
-import { buildModel, type MapTree, type Model, type Ticket } from "./model";
-import { renderToolbar, type ViewMode } from "./toolbar";
+import {
+  buildModel,
+  issueKey,
+  mergeModels,
+  type MapTree,
+  type Model,
+  type RawIssue,
+  type Ticket,
+} from "./model";
+import { renderToolbar, type ToolbarControls, type ViewMode } from "./toolbar";
 import { drawAllEdges, renderTree } from "./tree";
 
 export const VIEW_TYPE_WAYFINDER = "wayfinder-view";
 
 const MODE_KEY = "wayfinder-view-mode";
 const ZOOM_KEY = "wayfinder-zoom";
+const HIDDEN_REPOS_KEY = "wayfinder-hidden-repos";
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 2;
 
 export class WayfinderView extends ItemView {
   /** Per-map collapse override; default is expanded for open maps, collapsed for closed. */
-  private collapsedOverride = new Map<number, boolean>();
+  private collapsedOverride = new Map<string, boolean>();
   /** View-local delegation selection; never persisted. */
   private selectionMode = false;
-  private selectedIssues = new Set<number>();
+  private selectedIssues = new Set<string>();
 
   /** Per-device (localStorage, not synced): phones default to list, desktops to tree. */
   private get mode(): ViewMode {
@@ -73,16 +81,24 @@ export class WayfinderView extends ItemView {
   private lastRenderKey: string | null = null;
   private edgeRaf = 0;
   /** updated_at per issue as of the previous render — drives change flashes. */
-  private prevUpdated: Map<number, string> | null = null;
+  private prevUpdated: Map<string, string> | null = null;
 
   async onOpen(): Promise<void> {
     this.registerEvent(this.plugin.events.on("wayfinder:updated", () => this.onDataUpdated()));
-    this.registerEvent(this.plugin.events.on("wayfinder:settings", () => this.startPolling()));
+    this.registerEvent(
+      this.plugin.events.on("wayfinder:settings", () => {
+        this.startPolling();
+        this.render();
+      }),
+    );
     this.startPolling();
     this.registerZoomGestures();
     // Coming back from sleep/background: sync immediately if data is stale.
     this.registerDomEvent(window, "focus", () => {
-      const age = Date.now() - (this.plugin.snapshot?.fetchedAt ?? 0);
+      const fetchedAt = this.configuredRepos
+        .map((repo) => this.plugin.snapshots[repo]?.fetchedAt)
+        .filter((value): value is number => value !== undefined);
+      const age = Date.now() - (fetchedAt.length > 0 ? Math.min(...fetchedAt) : 0);
       if (age > Math.max(0.5, this.plugin.settings.pollIntervalMinutes) * 60_000) {
         void this.plugin.sync(false);
       }
@@ -165,26 +181,101 @@ export class WayfinderView extends ItemView {
     this.render();
   }
 
-  private snapshotKey(): string {
-    const s = this.plugin.snapshot;
-    const err = this.plugin.lastError ?? "";
-    if (!s) return `none|${err}|${this.plugin.syncing}`;
-    const issues = s.issues
-      .map((i) => `${i.number}:${i.updated_at}:${i.state}:${i.assignees.join(",")}`)
-      .join("|");
-    return `${err}|${issues}|${JSON.stringify(s.parents)}|${JSON.stringify(s.deps)}`;
+  private get configuredRepos(): string[] {
+    return this.plugin.settings.repos.map((config) => config.repo);
   }
 
-  private syncStatusText(): string {
-    const s = this.plugin.snapshot;
-    if (!s) return "";
-    const open = s.issues.filter((i) => i.state === "open").length;
-    const age = Date.now() - s.fetchedAt;
+  private get hiddenRepos(): Set<string> {
+    const configuredRepos = this.configuredRepos;
+    const configured = new Set(configuredRepos);
+    let stored: unknown = [];
+    try {
+      stored = JSON.parse(window.localStorage.getItem(HIDDEN_REPOS_KEY) ?? "[]");
+    } catch {
+      // Invalid local state resets to showing every repository.
+    }
+    const hidden = new Set(
+      Array.isArray(stored)
+        ? stored.filter((repo): repo is string => typeof repo === "string" && configured.has(repo))
+        : [],
+    );
+    if (configuredRepos.length < 2) hidden.clear();
+    const serialized = JSON.stringify([...hidden]);
+    if (window.localStorage.getItem(HIDDEN_REPOS_KEY) !== serialized) {
+      window.localStorage.setItem(HIDDEN_REPOS_KEY, serialized);
+    }
+    return hidden;
+  }
+
+  private get shownRepos(): string[] {
+    const hidden = this.hiddenRepos;
+    return this.configuredRepos.filter((repo) => !hidden.has(repo));
+  }
+
+  private shownModel(): Model {
+    return mergeModels(
+      this.shownRepos.flatMap((repo) => {
+        const snapshot = this.plugin.snapshots[repo];
+        return snapshot ? [buildModel(snapshot)] : [];
+      }),
+    );
+  }
+
+  private toggleRepo(repo: string): void {
+    const hidden = this.hiddenRepos;
+    if (hidden.has(repo)) hidden.delete(repo);
+    else hidden.add(repo);
+    window.localStorage.setItem(HIDDEN_REPOS_KEY, JSON.stringify([...hidden]));
+    this.render();
+  }
+
+  private showAllRepos(): void {
+    window.localStorage.setItem(HIDDEN_REPOS_KEY, "[]");
+    this.render();
+  }
+
+  private snapshotKey(): string {
+    const shownRepos = this.shownRepos;
+    const snapshots = shownRepos.map((repo) => {
+      const snapshot = this.plugin.snapshots[repo];
+      if (!snapshot) return [repo, null];
+      return [
+        repo,
+        {
+          fetchedAt: snapshot.fetchedAt,
+          issues: snapshot.issues.map(
+            (issue) =>
+              `${issue.number}:${issue.updated_at}:${issue.state}:${issue.assignees.join(",")}`,
+          ),
+          parents: snapshot.parents,
+          deps: snapshot.deps,
+        },
+      ];
+    });
+    return JSON.stringify({
+      shownRepos,
+      snapshots,
+      errors: this.configuredRepos.map((repo) => [repo, this.plugin.errors[repo] ?? ""]),
+      configError: this.plugin.configError,
+      syncing: this.configuredRepos.some((repo) => this.plugin.snapshots[repo])
+        ? undefined
+        : this.plugin.syncing,
+    });
+  }
+
+  private syncStatusText(
+    model = this.shownModel(),
+    shownCount = this.shownRepos.length,
+  ): string {
+    if (model.fetchedAt === 0) return "";
+    const age = Date.now() - model.fetchedAt;
     const staleAfter = Math.max(0.5, this.plugin.settings.pollIntervalMinutes) * 3 * 60_000;
     const when = this.plugin.syncing
       ? "syncing…"
-      : `synced ${relativeTime(s.fetchedAt)}${age > staleAfter ? " (stale)" : ""}`;
-    return `${s.issues.length} issues · ${open} open · ${when}`;
+      : `synced ${relativeTime(model.fetchedAt)}${age > staleAfter ? " (stale)" : ""}`;
+    const repoCount = this.configuredRepos.length;
+    const prefix = repoCount > 1 ? `${shownCount}/${repoCount} repos · ` : "";
+    return `${prefix}${model.totalIssues} issues · ${model.totalOpen} open · ${when}`;
   }
 
   private updateSyncStatus(): void {
@@ -195,7 +286,7 @@ export class WayfinderView extends ItemView {
   private scheduleEdges(): void {
     cancelAnimationFrame(this.edgeRaf);
     this.edgeRaf = requestAnimationFrame(() =>
-      drawAllEdges(this.contentEl, this.plugin.snapshot),
+      drawAllEdges(this.contentEl, this.plugin.snapshots),
     );
   }
 
@@ -219,10 +310,10 @@ export class WayfinderView extends ItemView {
   private render(): void {
     const root = this.contentEl;
     const scrollTop = root.scrollTop;
-    const mapScrollLeft = new Map<number, number>();
+    const mapScrollLeft = new Map<string, number>();
     for (const scroller of Array.from(root.querySelectorAll<HTMLElement>(".wf-tree-scroll"))) {
-      const mapNumber = Number(scroller.dataset.mapNumber);
-      if (Number.isFinite(mapNumber)) mapScrollLeft.set(mapNumber, scroller.scrollLeft);
+      const mapKey = scroller.dataset.mapKey;
+      if (mapKey) mapScrollLeft.set(mapKey, scroller.scrollLeft);
     }
     this.lastRenderKey = this.snapshotKey();
     root.empty();
@@ -236,15 +327,19 @@ export class WayfinderView extends ItemView {
     });
     this.resizeObserver.observe(root);
 
-    const snapshot = this.plugin.snapshot;
-    if (!snapshot) {
+    const configuredRepos = this.configuredRepos;
+    const configuredSnapshots = configuredRepos.filter((repo) => this.plugin.snapshots[repo]);
+    if (configuredSnapshots.length === 0) {
       const empty = root.createDiv({ cls: "wf-empty" });
       if (this.plugin.syncing) {
         empty.setText("Syncing…");
         return;
       }
-      if (this.plugin.lastError) {
-        empty.createDiv({ text: this.plugin.lastError, cls: "wf-error" });
+      const errors = this.errorLines();
+      if (this.plugin.configError) {
+        empty.createDiv({ text: this.plugin.configError, cls: "wf-error" });
+      } else if (errors.length > 0) {
+        for (const error of errors) empty.createDiv({ text: error, cls: "wf-error" });
       } else {
         empty.createDiv({ text: "No data yet. Configure Settings → Wayfinder, then sync." });
       }
@@ -253,28 +348,28 @@ export class WayfinderView extends ItemView {
       return;
     }
 
-    const model = buildModel(snapshot);
+    if (configuredRepos.length > 0 && this.shownRepos.length === 0) {
+      root.createDiv({
+        cls: "wf-empty",
+        text: "All repos hidden — use the repo filter to show one.",
+      });
+      const model = mergeModels([]);
+      renderToolbar(root, model, this.toolbarControls(model));
+      return;
+    }
+
+    const model = this.shownModel();
     this.pruneSelection(model);
     const anyExpanded = model.maps.some(
       (map) =>
-        !(this.collapsedOverride.get(map.issue.number) ?? map.issue.state === "closed"),
+        !(this.collapsedOverride.get(issueKey(map.repo, map.issue.number)) ??
+          map.issue.state === "closed"),
     );
-    renderToolbar(root, model, {
-      syncStatusText: this.syncStatusText(),
-      selectionMode: this.selectionMode,
-      mode: this.mode,
-      zoom: this.zoom,
-      anyExpanded,
-      toggleSelectionMode: () => this.toggleSelectionMode(),
-      toggleAllMaps: (expanded) => this.toggleAllMaps(model, expanded),
-      setZoom: (zoom) => this.setZoom(zoom),
-      adjustZoom: (factor) => this.setZoom(this.zoom * factor),
-      toggleMode: () => this.toggleMode(),
-      refresh: () => void this.plugin.sync(true),
-    });
-    if (this.plugin.lastError) {
-      root.createDiv({ text: `Last sync failed: ${this.plugin.lastError}`, cls: "wf-error" });
+    renderToolbar(root, model, this.toolbarControls(model, anyExpanded));
+    if (this.plugin.configError) {
+      root.createDiv({ text: this.plugin.configError, cls: "wf-error" });
     }
+    for (const error of this.errorLines()) root.createDiv({ text: error, cls: "wf-error" });
     const zoomWrap = root.createDiv({ cls: "wf-zoom" });
     zoomWrap.style.setProperty("zoom", String(this.zoom));
     if (model.orphans.length > 0) this.renderOrphans(zoomWrap, model.orphans);
@@ -283,23 +378,60 @@ export class WayfinderView extends ItemView {
 
     root.scrollTop = scrollTop;
     for (const scroller of Array.from(root.querySelectorAll<HTMLElement>(".wf-tree-scroll"))) {
-      const scrollLeft = mapScrollLeft.get(Number(scroller.dataset.mapNumber));
+      const scrollLeft = mapScrollLeft.get(scroller.dataset.mapKey ?? "");
       if (scrollLeft !== undefined) scroller.scrollLeft = scrollLeft;
     }
-    this.prevUpdated = new Map(snapshot.issues.map((i) => [i.number, i.updated_at]));
+    this.prevUpdated = new Map(
+      this.shownRepos.flatMap((repo) =>
+        (this.plugin.snapshots[repo]?.issues ?? []).map((issue) => [
+          issueKey(repo, issue.number),
+          issue.updated_at,
+        ]),
+      ),
+    );
     // Edges need final geometry — draw after layout settles.
     this.scheduleEdges();
   }
 
   /** True when this issue is new or changed since the previous render. */
-  private changedSinceLastRender(issue: RawIssue): boolean {
+  private changedSinceLastRender(repo: string, issue: RawIssue): boolean {
     if (!this.prevUpdated) return false; // first render — nothing to compare
-    return this.prevUpdated.get(issue.number) !== issue.updated_at;
+    return this.prevUpdated.get(issueKey(repo, issue.number)) !== issue.updated_at;
   }
 
   private toggleAllMaps(model: Model, anyExpanded: boolean): void {
-    for (const map of model.maps) this.collapsedOverride.set(map.issue.number, anyExpanded);
+    for (const map of model.maps) {
+      this.collapsedOverride.set(issueKey(map.repo, map.issue.number), anyExpanded);
+    }
     this.render();
+  }
+
+  private toolbarControls(model: Model, anyExpanded = false): ToolbarControls {
+    const shown = new Set(this.shownRepos);
+    return {
+      syncStatusText: this.syncStatusText(model, shown.size),
+      selectionMode: this.selectionMode,
+      mode: this.mode,
+      zoom: this.zoom,
+      anyExpanded,
+      repos: this.configuredRepos.map((repo) => ({ repo, shown: shown.has(repo) })),
+      toggleSelectionMode: () => this.toggleSelectionMode(),
+      toggleAllMaps: (expanded: boolean) => this.toggleAllMaps(model, expanded),
+      setZoom: (zoom: number) => this.setZoom(zoom),
+      adjustZoom: (factor: number) => this.setZoom(this.zoom * factor),
+      toggleMode: () => this.toggleMode(),
+      toggleRepo: (repo: string) => this.toggleRepo(repo),
+      showAllRepos: () => this.showAllRepos(),
+      refresh: () => void this.plugin.sync(true),
+    };
+  }
+
+  private errorLines(): string[] {
+    const prefixRepo = this.configuredRepos.length > 1;
+    return this.configuredRepos.flatMap((repo) => {
+      const error = this.plugin.errors[repo];
+      return error ? [`${prefixRepo ? `${repo} — ` : ""}${error}`] : [];
+    });
   }
 
   private toggleMode(): void {
@@ -315,27 +447,31 @@ export class WayfinderView extends ItemView {
   private pruneSelection(model: Model): void {
     const frontier = new Set(
       model.maps.flatMap((map) =>
-        map.tickets.filter((ticket) => ticket.frontier).map((ticket) => ticket.issue.number),
+        map.tickets
+          .filter((ticket) => ticket.frontier)
+          .map((ticket) => issueKey(ticket.repo, ticket.issue.number)),
       ),
     );
-    for (const number of this.selectedIssues) {
-      if (!frontier.has(number)) this.selectedIssues.delete(number);
+    for (const key of this.selectedIssues) {
+      if (!frontier.has(key)) this.selectedIssues.delete(key);
     }
   }
 
   private selectedTickets(model: Model): Ticket[] {
     return model.maps.flatMap((map) =>
       map.tickets.filter(
-        (ticket) => ticket.frontier && this.selectedIssues.has(ticket.issue.number),
+        (ticket) =>
+          ticket.frontier && this.selectedIssues.has(issueKey(ticket.repo, ticket.issue.number)),
       ),
     );
   }
 
   private toggleTicketSelection(ticket: Ticket): void {
-    if (this.selectedIssues.has(ticket.issue.number)) {
-      this.selectedIssues.delete(ticket.issue.number);
+    const key = issueKey(ticket.repo, ticket.issue.number);
+    if (this.selectedIssues.has(key)) {
+      this.selectedIssues.delete(key);
     } else {
-      this.selectedIssues.add(ticket.issue.number);
+      this.selectedIssues.add(key);
     }
     this.render();
   }
@@ -395,7 +531,7 @@ export class WayfinderView extends ItemView {
           const ticket = selected[index];
           results[index] = {
             ticket,
-            result: await this.plugin.verifyTakeable(ticket.issue.number),
+            result: await this.plugin.verifyTakeable(ticket.repo, ticket.issue.number),
           };
         }
       });
@@ -464,7 +600,8 @@ export class WayfinderView extends ItemView {
 
   private renderMap(root: HTMLElement, map: MapTree): void {
     const isClosed = map.issue.state === "closed";
-    const collapsed = this.collapsedOverride.get(map.issue.number) ?? isClosed;
+    const mapKey = issueKey(map.repo, map.issue.number);
+    const collapsed = this.collapsedOverride.get(mapKey) ?? isClosed;
     const expanded = !collapsed;
     const section = root.createDiv({ cls: "wf-map-section" });
 
@@ -476,7 +613,7 @@ export class WayfinderView extends ItemView {
     setIcon(chevron, expanded ? "chevron-down" : "chevron-right");
     chevron.addEventListener("click", (e) => {
       e.stopPropagation();
-      this.collapsedOverride.set(map.issue.number, expanded);
+      this.collapsedOverride.set(mapKey, expanded);
       this.render();
     });
 
@@ -516,12 +653,12 @@ export class WayfinderView extends ItemView {
       }
     }
 
-    if (this.changedSinceLastRender(map.issue)) head.addClass("wf-changed");
-    addIconActions(head, map.issue, this.plugin, () =>
+    if (this.changedSinceLastRender(map.repo, map.issue)) head.addClass("wf-changed");
+    addIconActions(head, map.repo, map.issue, this.plugin, () =>
       new TicketModal(this.app, this.plugin, null, map).open(),
     );
     this.makeInteractive(headMain, () => {
-      this.collapsedOverride.set(map.issue.number, expanded);
+      this.collapsedOverride.set(mapKey, expanded);
       this.render();
     });
     this.hoverCards.attach(head, null, map);
@@ -546,8 +683,8 @@ export class WayfinderView extends ItemView {
       app: this.app,
       plugin: this.plugin,
       selectionMode: this.selectionMode,
-      selected: (ticket) => this.selectedIssues.has(ticket.issue.number),
-      changed: (issue) => this.changedSinceLastRender(issue),
+      selected: (ticket) => this.selectedIssues.has(issueKey(ticket.repo, ticket.issue.number)),
+      changed: (ticket) => this.changedSinceLastRender(ticket.repo, ticket.issue),
       makeInteractive: (element, activate) => this.makeInteractive(element, activate),
       attachHover: (element, ticket, map) => this.hoverCards.attach(element, ticket, map),
       select: (ticket) => this.toggleTicketSelection(ticket),

@@ -6,7 +6,8 @@
  * Usage: GH_TOKEN=$(gh auth token) npm run smoke
  */
 import { GitHubClient, fetchSnapshot, type Http } from "../src/github";
-import { buildModel } from "../src/model";
+import type { RepoConfig } from "../src/config";
+import { buildModel, type Snapshot } from "../src/model";
 
 const token = process.env.GH_TOKEN;
 if (!token) {
@@ -27,13 +28,15 @@ const http: Http = async (url, headers) => {
   };
 };
 
-const gh = new GitHubClient(() => ({ token, repo: "OcuClawhub/evenclaw" }), http);
+const config: RepoConfig = { token, repo: "OcuClawhub/evenclaw" };
+const gh = new GitHubClient(() => config, http);
 
 const t0 = Date.now();
 const snapshot = await fetchSnapshot(gh, null, true);
+const snapshots: Record<string, Snapshot> = { [config.repo]: snapshot };
 console.log(`fetched ${snapshot.issues.length} issues in ${Date.now() - t0}ms`);
 
-const model = buildModel(snapshot);
+const model = buildModel(snapshots[config.repo]);
 
 let failures = 0;
 function check(name: string, ok: boolean): void {
@@ -88,8 +91,8 @@ const countingHttp: Http = async (url, headers) => {
   if (url.includes("/dependencies/")) depCalls++;
   return http(url, headers);
 };
-const gh2 = new GitHubClient(() => ({ token, repo: "OcuClawhub/evenclaw" }), countingHttp);
-await fetchSnapshot(gh2, snapshot, false);
+const gh2 = new GitHubClient(() => config, countingHttp);
+await fetchSnapshot(gh2, snapshots[config.repo], false);
 check(`incremental sync makes 0 dependency calls (made ${depCalls})`, depCalls === 0);
 
 for (const o of model.orphans) {

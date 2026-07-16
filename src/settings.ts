@@ -1,19 +1,14 @@
 import { App, Notice, PluginSettingTab, Setting } from "obsidian";
+import { DEFAULT_SETTINGS } from "./config";
 import type WayfinderPlugin from "./main";
 
-export interface WayfinderSettings {
-  token: string;
-  repo: string;
-  pollIntervalMinutes: number;
-  copyTemplate: string;
-}
+export { DEFAULT_SETTINGS } from "./config";
+export type { RepoConfig, WayfinderSettings } from "./config";
 
-export const DEFAULT_SETTINGS: WayfinderSettings = {
-  token: "",
-  repo: "OcuClawhub/evenclaw",
-  pollIntervalMinutes: 2,
-  copyTemplate: "/wayfinder {url}",
-};
+const TOKEN_DESCRIPTION =
+  "Fine-grained personal access token with read-only Issues permission for the repo. " +
+  "Create one at github.com → Settings → Developer settings → Fine-grained tokens. " +
+  "Stored in plain text in this vault's plugin data.";
 
 export class WayfinderSettingTab extends PluginSettingTab {
   constructor(app: App, private plugin: WayfinderPlugin) {
@@ -24,49 +19,62 @@ export class WayfinderSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    new Setting(containerEl)
-      .setName("GitHub token")
-      .setDesc(
-        "Fine-grained personal access token with read-only Issues permission for the repo. " +
-          "Create one at github.com → Settings → Developer settings → Fine-grained tokens. " +
-          "Stored in plain text in this vault's plugin data.",
-      )
-      .addText((text) => {
+    this.plugin.settings.repos.forEach((config, index) => {
+      new Setting(containerEl)
+        .setName(`Repository ${index + 1}`)
+        .setDesc("owner/name of the repo holding the wayfinder maps.")
+        .addText((text) =>
+          text
+            .setPlaceholder("owner/name")
+            .setValue(config.repo)
+            .onChange(async (value) => {
+              config.repo = value.trim();
+              await this.plugin.saveSettings();
+            }),
+        );
+
+      new Setting(containerEl).setName("GitHub token").setDesc(TOKEN_DESCRIPTION).addText((text) => {
         text
           .setPlaceholder("github_pat_…")
-          .setValue(this.plugin.settings.token)
+          .setValue(config.token)
           .onChange(async (value) => {
-            this.plugin.settings.token = value.trim();
+            config.token = value.trim();
             await this.plugin.saveSettings();
           });
         text.inputEl.type = "password";
         text.inputEl.style.width = "100%";
       });
 
-    new Setting(containerEl)
-      .setName("Repository")
-      .setDesc("owner/name of the repo holding the wayfinder maps.")
-      .addText((text) =>
-        text
-          .setPlaceholder("owner/name")
-          .setValue(this.plugin.settings.repo)
-          .onChange(async (value) => {
-            this.plugin.settings.repo = value.trim();
-            await this.plugin.saveSettings();
+      new Setting(containerEl)
+        .setName("Repository actions")
+        .setDesc("Check access or remove this repository.")
+        .addButton((button) =>
+          button.setButtonText("Test connection").onClick(async () => {
+            try {
+              const fullName = await this.plugin.testConnection(config);
+              new Notice(`Connected: ${fullName} — issues readable`);
+            } catch (e) {
+              new Notice(e instanceof Error ? e.message : String(e));
+            }
           }),
-      );
+        )
+        .addButton((button) =>
+          button.setButtonText("Remove").onClick(async () => {
+            this.plugin.settings.repos.splice(index, 1);
+            await this.plugin.saveSettings();
+            this.display();
+          }),
+        );
+    });
 
     new Setting(containerEl)
-      .setName("Test connection")
-      .setDesc("Check that the token can access this repository.")
+      .setName("Repositories")
+      .setDesc("Sync another repository into the combined Wayfinder view.")
       .addButton((button) =>
-        button.setButtonText("Test connection").onClick(async () => {
-          try {
-            const fullName = await this.plugin.testConnection();
-            new Notice(`Connected: ${fullName} — issues readable`);
-          } catch (e) {
-            new Notice(e instanceof Error ? e.message : String(e));
-          }
+        button.setButtonText("Add repository").onClick(async () => {
+          this.plugin.settings.repos.push({ repo: "", token: "" });
+          await this.plugin.saveSettings();
+          this.display();
         }),
       );
 

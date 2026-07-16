@@ -1,12 +1,19 @@
 import { Events, Notice, Plugin, WorkspaceLeaf, requestUrl } from "obsidian";
+import {
+  DEFAULT_SETTINGS,
+  isValidRepoConfig,
+  sanitizeSettings,
+  type RepoConfig,
+  type WayfinderSettings,
+} from "./config";
 import { GitHubClient, fetchSnapshot, type Http, type IssueComment } from "./github";
 import { buildModel, type RawIssue, type Snapshot } from "./model";
-import { DEFAULT_SETTINGS, WayfinderSettingTab, type WayfinderSettings } from "./settings";
+import { WayfinderSettingTab } from "./settings";
 import { VIEW_TYPE_WAYFINDER, WayfinderView } from "./view";
 
 interface PersistedData {
   settings: WayfinderSettings;
-  snapshot: Snapshot | null;
+  snapshots: Record<string, Snapshot>;
 }
 
 export type TakeableVerification =
@@ -27,47 +34,26 @@ const obsidianHttp: Http = async (url, headers) => {
 
 const FULL_SYNC_MAX_AGE = 24 * 60 * 60 * 1000;
 
-function sanitizeSettings(value: unknown): WayfinderSettings {
-  const raw = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
-  let interval = DEFAULT_SETTINGS.pollIntervalMinutes;
-  try {
-    const coerced = Number(raw.pollIntervalMinutes);
-    if (Number.isFinite(coerced)) interval = Math.min(120, Math.max(0.5, coerced));
-  } catch {
-    // Keep the default for values that cannot be converted to a number.
-  }
-  return {
-    token: typeof raw.token === "string" ? raw.token : DEFAULT_SETTINGS.token,
-    repo: typeof raw.repo === "string" ? raw.repo : DEFAULT_SETTINGS.repo,
-    pollIntervalMinutes: interval,
-    copyTemplate:
-      typeof raw.copyTemplate === "string" ? raw.copyTemplate : DEFAULT_SETTINGS.copyTemplate,
-  };
-}
-
 export default class WayfinderPlugin extends Plugin {
-  settings: WayfinderSettings = { ...DEFAULT_SETTINGS };
-  snapshot: Snapshot | null = null;
+  settings: WayfinderSettings = { ...DEFAULT_SETTINGS, repos: [] };
+  snapshots: Record<string, Snapshot> = {};
   events = new Events();
   syncing = false;
-  lastError: string | null = null;
+  errors: Record<string, string> = {};
+  configError: string | null = null;
   private pendingSync: boolean | null = null;
-  private github = new GitHubClient(
-    () => ({ token: this.settings.token, repo: this.settings.repo }),
-    obsidianHttp,
-  );
 
-  fetchComments(issueNumber: number): Promise<IssueComment[]> {
-    return this.github.comments(issueNumber);
+  fetchComments(repo: string, issueNumber: number): Promise<IssueComment[]> {
+    return this.clientForRepo(repo).comments(issueNumber);
   }
 
-  testConnection(): Promise<string> {
-    return this.github.testConnection();
+  testConnection(config: RepoConfig): Promise<string> {
+    return this.createClient(config).testConnection();
   }
 
   /** Live-check an open, unclaimed ticket right before acting on it. */
-  async verifyTakeable(issueNumber: number): Promise<TakeableVerification> {
-    const snap = this.snapshot;
+  async verifyTakeable(repo: string, issueNumber: number): Promise<TakeableVerification> {
+    const snap = this.snapshots[repo];
     const cached = snap?.issues.find((i) => i.number === issueNumber);
     if (!snap || !cached || cached.state !== "open" || cached.assignees.length > 0) {
       return { status: "ok" };
@@ -75,7 +61,7 @@ export default class WayfinderPlugin extends Plugin {
     let fresh: RawIssue | null;
     try {
       fresh = await Promise.race([
-        this.github.issue(issueNumber),
+        this.clientForRepo(repo).issue(issueNumber),
         new Promise<null>((resolve) => window.setTimeout(() => resolve(null), 2000)),
       ]);
     } catch {
@@ -98,8 +84,8 @@ export default class WayfinderPlugin extends Plugin {
     return { status: "ok" };
   }
 
-  async guardedAction(issueNumber: number, action: () => void): Promise<void> {
-    const result = await this.verifyTakeable(issueNumber);
+  async guardedAction(repo: string, issueNumber: number, action: () => void): Promise<void> {
+    const result = await this.verifyTakeable(repo, issueNumber);
     if (result.status === "ok") {
       action();
       return;
@@ -122,17 +108,21 @@ export default class WayfinderPlugin extends Plugin {
 
   /** Copy the /wayfinder command for the newest frontier ticket. */
   copyNextTakeable(): void {
-    if (!this.snapshot) {
+    if (!this.settings.repos.some((config) => this.snapshots[config.repo])) {
       new Notice("Wayfinder: no data yet — open the view to sync first.");
       return;
     }
-    const model = buildModel(this.snapshot);
-    const frontier = model.maps.flatMap((map) => map.tickets.filter((ticket) => ticket.frontier));
-    if (frontier.length > 0) {
+    for (const config of this.settings.repos) {
+      const snapshot = this.snapshots[config.repo];
+      if (!snapshot) continue;
+      const frontier = buildModel(snapshot).maps.flatMap((map) =>
+        map.tickets.filter((ticket) => ticket.frontier),
+      );
+      if (frontier.length === 0) continue;
       const pick = frontier.reduce((newest, ticket) =>
         ticket.issue.number > newest.issue.number ? ticket : newest,
       );
-      void this.guardedAction(pick.issue.number, () => {
+      void this.guardedAction(config.repo, pick.issue.number, () => {
         this.copyCommand(pick.issue.html_url);
         new Notice(`Next takeable: #${pick.issue.number} ${pick.issue.title}`);
       });
@@ -150,15 +140,24 @@ export default class WayfinderPlugin extends Plugin {
   }
 
   async onload(): Promise<void> {
-    const data = ((await this.loadData()) ?? {}) as Partial<PersistedData>;
+    const data = ((await this.loadData()) ?? {}) as Partial<PersistedData> & {
+      snapshot?: Snapshot | null;
+    };
     this.settings = sanitizeSettings(data.settings);
-    const loadedSnapshot = data.snapshot ?? null;
-    this.snapshot =
-      loadedSnapshot &&
-      loadedSnapshot.schemaVersion === 2 &&
-      loadedSnapshot.repo === this.settings.repo
-        ? loadedSnapshot
-        : null;
+    const configured = new Set(this.settings.repos.map((config) => config.repo));
+    const loaded: Record<string, unknown> =
+      data.snapshots && typeof data.snapshots === "object" ? { ...data.snapshots } : {};
+    if (data.snapshot && !loaded[data.snapshot.repo]) loaded[data.snapshot.repo] = data.snapshot;
+    this.snapshots = Object.fromEntries(
+      Object.entries(loaded).filter(
+        ([repo, snapshot]) =>
+          configured.has(repo) &&
+          !!snapshot &&
+          typeof snapshot === "object" &&
+          (snapshot as Snapshot).schemaVersion === 2 &&
+          (snapshot as Snapshot).repo === repo,
+      ),
+    ) as Record<string, Snapshot>;
 
     this.registerView(VIEW_TYPE_WAYFINDER, (leaf) => new WayfinderView(leaf, this));
     this.addRibbonIcon("compass", "Open Wayfinder", () => this.activateView());
@@ -214,29 +213,57 @@ export default class WayfinderPlugin extends Plugin {
   }
 
   private async runSync(requestedFull: boolean): Promise<void> {
-    const config = { token: this.settings.token, repo: this.settings.repo };
-    if (!config.token || !config.repo.includes("/")) {
-      this.lastError = "Set a GitHub token and repo in Settings → Wayfinder.";
+    const configured = new Set(this.settings.repos.map((config) => config.repo));
+    for (const repo of Object.keys(this.snapshots)) {
+      if (!configured.has(repo)) delete this.snapshots[repo];
+    }
+    for (const repo of Object.keys(this.errors)) {
+      if (!configured.has(repo)) delete this.errors[repo];
+    }
+
+    const configs = this.settings.repos.filter(isValidRepoConfig);
+    if (configs.length === 0) {
+      this.configError = "Add a GitHub repo and token in Settings → Wayfinder.";
+      await this.persist();
       this.events.trigger("wayfinder:updated");
       return;
     }
+    this.configError = null;
 
-    const prev = this.snapshot?.repo === config.repo ? this.snapshot : null;
-    const full =
-      requestedFull ||
-      !prev?.lastFullSync ||
-      Date.now() - prev.lastFullSync >= FULL_SYNC_MAX_AGE;
-    const github = new GitHubClient(() => config, obsidianHttp);
-    let warning: string | null = null;
-    try {
-      this.snapshot = await fetchSnapshot(github, prev, full, (message) => {
-        warning = message;
-      });
-      this.lastError = warning;
-      await this.persist();
-    } catch (e) {
-      this.lastError = e instanceof Error ? e.message : String(e);
-      new Notice(`Wayfinder sync failed: ${this.lastError}`);
+    const failures = (
+      await Promise.all(
+        configs.map(async (config) => {
+          const prev = this.snapshots[config.repo]?.repo === config.repo
+            ? this.snapshots[config.repo]
+            : null;
+          const full =
+            requestedFull ||
+            !prev?.lastFullSync ||
+            Date.now() - prev.lastFullSync >= FULL_SYNC_MAX_AGE;
+          let warning: string | null = null;
+          try {
+            this.snapshots[config.repo] = await fetchSnapshot(
+              this.createClient(config),
+              prev,
+              full,
+              (message) => {
+                warning = message;
+              },
+            );
+            if (warning) this.errors[config.repo] = warning;
+            else delete this.errors[config.repo];
+            return null;
+          } catch (e) {
+            const message = e instanceof Error ? e.message : String(e);
+            this.errors[config.repo] = message;
+            return `${config.repo}: ${message}`;
+          }
+        }),
+      )
+    ).filter((failure): failure is string => failure !== null);
+    await this.persist();
+    if (failures.length > 0) {
+      new Notice(`Wayfinder sync failed: ${failures.join(" · ")}`);
     }
     this.events.trigger("wayfinder:updated");
   }
@@ -245,15 +272,12 @@ export default class WayfinderPlugin extends Plugin {
 
   /** Persist settings and, once edits settle, try a sync with the new values. */
   async saveSettings(): Promise<void> {
-    const repoChanged = this.snapshot !== null && this.snapshot.repo !== this.settings.repo;
-    if (repoChanged) this.snapshot = null;
     await this.persist();
-    if (repoChanged) this.events.trigger("wayfinder:updated");
     this.events.trigger("wayfinder:settings");
     if (this.settingsSyncTimer !== null) window.clearTimeout(this.settingsSyncTimer);
     this.settingsSyncTimer = window.setTimeout(() => {
       this.settingsSyncTimer = null;
-      if (this.settings.token && this.settings.repo.includes("/")) void this.sync(true);
+      if (this.settings.repos.some(isValidRepoConfig)) void this.sync(true);
     }, 800);
   }
 
@@ -264,8 +288,18 @@ export default class WayfinderPlugin extends Plugin {
     }
   }
 
+  private createClient(config: RepoConfig): GitHubClient {
+    return new GitHubClient(() => config, obsidianHttp);
+  }
+
+  private clientForRepo(repo: string): GitHubClient {
+    const config = this.settings.repos.find((entry) => entry.repo === repo);
+    if (!config) throw new Error(`Repository is no longer configured: ${repo}`);
+    return this.createClient(config);
+  }
+
   private async persist(): Promise<void> {
-    const data: PersistedData = { settings: this.settings, snapshot: this.snapshot };
+    const data: PersistedData = { settings: this.settings, snapshots: this.snapshots };
     await this.saveData(data);
   }
 }

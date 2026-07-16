@@ -9,7 +9,7 @@ export interface TicketCardOptions {
   asRow?: boolean;
   selectionMode: boolean;
   selected(ticket: Ticket): boolean;
-  changed(issue: RawIssue): boolean;
+  changed(ticket: Ticket): boolean;
   makeInteractive(el: HTMLElement, activate: () => void): void;
   attachHover(el: HTMLElement, ticket: Ticket, map: MapTree): void;
   select(ticket: Ticket): void;
@@ -71,8 +71,8 @@ export function renderTicketCard(
   }
   main.createDiv({ cls: "wf-meta", text: metaText });
 
-  if (options.changed(ticket.issue)) card.addClass("wf-changed");
-  addIconActions(card, ticket.issue, options.plugin, undefined, ticket.frontier);
+  if (options.changed(ticket)) card.addClass("wf-changed");
+  addIconActions(card, ticket.repo, ticket.issue, options.plugin, undefined, ticket.frontier);
   options.makeInteractive(main, () => {
     if (options.selectionMode && ticket.frontier) {
       options.select(ticket);
@@ -89,6 +89,7 @@ export function renderTicketCard(
  */
 export function addIconActions(
   card: HTMLElement,
+  repo: string,
   issue: RawIssue,
   plugin: WayfinderPlugin,
   onInfo?: () => void,
@@ -109,7 +110,7 @@ export function addIconActions(
 
   const guarded = async (action: () => void): Promise<void> => {
     if (claimCheck) {
-      await plugin.guardedAction(issue.number, action);
+      await plugin.guardedAction(repo, issue.number, action);
       return;
     }
     action();

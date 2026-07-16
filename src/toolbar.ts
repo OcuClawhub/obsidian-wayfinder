@@ -9,11 +9,14 @@ export interface ToolbarControls {
   mode: ViewMode;
   zoom: number;
   anyExpanded: boolean;
+  repos: { repo: string; shown: boolean }[];
   toggleSelectionMode(): void;
   toggleAllMaps(anyExpanded: boolean): void;
   setZoom(zoom: number): void;
   adjustZoom(factor: number): void;
   toggleMode(): void;
+  toggleRepo(repo: string): void;
+  showAllRepos(): void;
   refresh(): void;
 }
 
@@ -58,6 +61,7 @@ export function renderToolbar(
 
   const right = bar.createDiv({ cls: "wf-tally-right" });
   right.createSpan({ cls: "wf-sync-status", text: controls.syncStatusText });
+  if (controls.repos.length >= 2) renderRepoFilter(right, controls);
   if (!Platform.isMobile) renderDesktopControls(right, controls);
 
   const refresh = right.createEl("button", {
@@ -76,6 +80,32 @@ export function renderToolbar(
       showMobileMenu(event, model, controls),
     );
   }
+}
+
+function renderRepoFilter(right: HTMLElement, controls: ToolbarControls): void {
+  const shown = controls.repos.filter((config) => config.shown).length;
+  const filter = right.createEl("button", {
+    cls: "wf-refresh wf-repo-filter",
+    attr: { "aria-label": "Filter repos" },
+  });
+  setIcon(filter, "git-branch");
+  if (shown < controls.repos.length) {
+    filter.createSpan({ text: `${shown}/${controls.repos.length}` });
+  }
+  filter.addEventListener("click", (event: MouseEvent) => {
+    const menu = new Menu();
+    for (const config of controls.repos) {
+      menu.addItem((item) =>
+        item
+          .setTitle(config.repo)
+          .setChecked(config.shown)
+          .onClick(() => controls.toggleRepo(config.repo)),
+      );
+    }
+    menu.addSeparator();
+    menu.addItem((item) => item.setTitle("Show all").onClick(controls.showAllRepos));
+    menu.showAtMouseEvent(event);
+  });
 }
 
 function renderDesktopControls(right: HTMLElement, controls: ToolbarControls): void {

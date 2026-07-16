@@ -67,6 +67,7 @@ body.theme-light .wayfinder-view {
 }
 .wf-refresh:hover { color: var(--text-normal); border-color: var(--text-faint); }
 .wf-refresh svg { width: 15px; height: 15px; }
+.wf-repo-filter { gap: 0.3rem; }
 .wf-select-toggle { gap: 0.3rem; }
 .wf-select-toggle.is-active {
   color: var(--text-on-accent); background: var(--interactive-accent);

@@ -22,6 +22,7 @@ export class TicketModal extends Modal {
     const { contentEl } = this;
     contentEl.addClass("wf-modal");
     const issue = this.ticket ? this.ticket.issue : this.map!.issue;
+    const repo = this.ticket ? this.ticket.repo : this.map!.repo;
 
     const head = contentEl.createDiv({ cls: "wf-modal-head" });
     const row = head.createDiv({ cls: "wf-row1" });
@@ -42,7 +43,7 @@ export class TicketModal extends Modal {
     const copyBtn = actions.createEl("button", { text: "Copy /wayfinder command", cls: "mod-cta" });
     copyBtn.addEventListener("click", () => {
       const action = (): void => this.plugin.copyCommand(issue.html_url);
-      if (this.ticket?.frontier) void this.plugin.guardedAction(issue.number, action);
+      if (this.ticket?.frontier) void this.plugin.guardedAction(repo, issue.number, action);
       else action();
     });
     const ghBtn = actions.createEl("button", { text: "Open on GitHub ↗" });
@@ -50,7 +51,7 @@ export class TicketModal extends Modal {
       const action = (): void => {
         window.open(issue.html_url, "_blank");
       };
-      if (this.ticket?.frontier) void this.plugin.guardedAction(issue.number, action);
+      if (this.ticket?.frontier) void this.plugin.guardedAction(repo, issue.number, action);
       else action();
     });
 
@@ -72,12 +73,12 @@ export class TicketModal extends Modal {
       const kv = contentEl.createDiv({ cls: "wf-hc-kv" });
       kv.createSpan({ text: "Blocked by: " });
       for (const blocker of this.ticket.blockers) {
-        const repo = blocker.repo ?? this.plugin.settings.repo;
+        const blockerRepo = blocker.repo ?? this.ticket.repo;
         kv.createEl("a", {
           text: openSet.has(blocker)
             ? `${blockerLabel(blocker)} (open)`
             : `${blockerLabel(blocker)} ✓`,
-          href: `https://github.com/${repo}/issues/${blocker.number}`,
+          href: `https://github.com/${blockerRepo}/issues/${blocker.number}`,
           cls: "wf-blocker-link",
         });
       }
@@ -102,7 +103,7 @@ export class TicketModal extends Modal {
     commentsEl.createDiv({ cls: "wf-comments-h", text: "Comments" });
     const status = commentsEl.createDiv({ cls: "wf-hc-kv", text: "Loading comments…" });
     void this.plugin
-      .fetchComments(issue.number)
+      .fetchComments(repo, issue.number)
       .then((comments) => {
         if (this.closed) return;
         status.remove();

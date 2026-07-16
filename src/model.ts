@@ -50,6 +50,7 @@ export interface Snapshot {
 }
 
 export interface Ticket {
+  repo: string;
   issue: RawIssue;
   type: TicketType;
   mode: Mode;
@@ -64,6 +65,7 @@ export interface Ticket {
 }
 
 export interface MapTree {
+  repo: string;
   issue: RawIssue;
   tickets: Ticket[];
   layers: Ticket[][];
@@ -127,6 +129,10 @@ export function blockerLabel(blocker: BlockerRef): string {
   return `${blocker.repo ? `${blocker.repo}#` : "#"}${blocker.number}`;
 }
 
+export function issueKey(repo: string, number: number): string {
+  return `${repo}#${number}`;
+}
+
 /** The ticket body minus the "Part of #N" line — used for hover excerpts. */
 export function descriptionOf(body: string | null): string {
   if (!body) return "";
@@ -156,6 +162,7 @@ export function buildModel(snap: Snapshot): Model {
     });
     const unverified = dep?.unverified === true;
     tickets.push({
+      repo: snap.repo,
       issue,
       type,
       mode: hasConflictingLabels(issue.labels) ? "HITL" : modeOf(type, issue.labels),
@@ -194,6 +201,7 @@ export function buildModel(snap: Snapshot): Model {
     for (const t of kids) (layers[t.layer] ??= []).push(t);
     orderWithinLayers(layers);
     return {
+      repo: snap.repo,
       issue,
       tickets: kids,
       layers,
@@ -229,6 +237,36 @@ export function buildModel(snap: Snapshot): Model {
     totalIssues: snap.issues.length,
     totalOpen,
     fetchedAt: snap.fetchedAt,
+  };
+}
+
+function compareModelEntries(
+  a: { repo: string; issue: RawIssue },
+  b: { repo: string; issue: RawIssue },
+): number {
+  if (a.issue.state !== b.issue.state) return a.issue.state === "open" ? -1 : 1;
+  return b.issue.number - a.issue.number || a.repo.localeCompare(b.repo);
+}
+
+export function mergeModels(models: Model[]): Model {
+  const tallyMap = new Map<"map" | TicketType, Tally>(
+    TYPE_PRECEDENCE.map((type) => [type, { open: 0, total: 0 }]),
+  );
+  for (const model of models) {
+    for (const { type, tally } of model.tallies) {
+      const total = tallyMap.get(type)!;
+      total.open += tally.open;
+      total.total += tally.total;
+    }
+  }
+
+  return {
+    maps: models.flatMap((model) => model.maps).sort(compareModelEntries),
+    orphans: models.flatMap((model) => model.orphans).sort(compareModelEntries),
+    tallies: [...tallyMap.entries()].map(([type, tally]) => ({ type, tally })),
+    totalIssues: models.reduce((total, model) => total + model.totalIssues, 0),
+    totalOpen: models.reduce((total, model) => total + model.totalOpen, 0),
+    fetchedAt: models.length > 0 ? Math.min(...models.map((model) => model.fetchedAt)) : 0,
   };
 }
 
