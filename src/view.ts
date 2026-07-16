@@ -1,4 +1,4 @@
-import { ItemView, Platform, WorkspaceLeaf, setIcon } from "obsidian";
+import { ItemView, Menu, Platform, WorkspaceLeaf, setIcon } from "obsidian";
 import type { RawIssue } from "./model";
 import type WayfinderPlugin from "./main";
 import { TicketModal } from "./modal";
@@ -199,8 +199,12 @@ export class WayfinderView extends ItemView {
   private makeInteractive(el: HTMLElement, activate: () => void): void {
     el.setAttr("tabindex", "0");
     el.setAttr("role", "button");
-    el.addEventListener("click", activate);
+    el.addEventListener("click", (e: MouseEvent) => {
+      if (e.target instanceof Element && e.target.closest(".wf-actions")) return;
+      activate();
+    });
     el.addEventListener("keydown", (e: KeyboardEvent) => {
+      if (e.target !== el) return;
       if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
         activate();
@@ -211,6 +215,11 @@ export class WayfinderView extends ItemView {
   private render(): void {
     const root = this.contentEl;
     const scrollTop = root.scrollTop;
+    const mapScrollLeft = new Map<number, number>();
+    for (const scroller of Array.from(root.querySelectorAll<HTMLElement>(".wf-tree-scroll"))) {
+      const mapNumber = Number(scroller.dataset.mapNumber);
+      if (Number.isFinite(mapNumber)) mapScrollLeft.set(mapNumber, scroller.scrollLeft);
+    }
     this.lastRenderKey = this.snapshotKey();
     root.empty();
     root.addClass("wayfinder-view");
@@ -247,6 +256,10 @@ export class WayfinderView extends ItemView {
     for (const map of model.maps) this.renderMap(zoomWrap, map);
 
     root.scrollTop = scrollTop;
+    for (const scroller of Array.from(root.querySelectorAll<HTMLElement>(".wf-tree-scroll"))) {
+      const scrollLeft = mapScrollLeft.get(Number(scroller.dataset.mapNumber));
+      if (scrollLeft !== undefined) scroller.scrollLeft = scrollLeft;
+    }
     this.prevUpdated = new Map(snapshot.issues.map((i) => [i.number, i.updated_at]));
     // Edges need final geometry — draw after layout settles.
     this.scheduleEdges();
@@ -262,12 +275,14 @@ export class WayfinderView extends ItemView {
 
   private renderTallyBar(root: HTMLElement, model: Model): void {
     const bar = root.createDiv({ cls: "wf-tally" });
-    for (const { type, tally } of model.tallies) {
-      const stat = bar.createDiv({ cls: `wf-stat wf-t-${type}` });
-      stat.createSpan({ cls: "wf-swatch" });
-      stat.createSpan({ cls: "wf-stat-num", text: `${tally.open}/${tally.total}` });
-      stat.createSpan({ cls: "wf-stat-lbl", text: type === "map" ? "maps" : type });
-      stat.setAttr("aria-label", `${type}: ${tally.open} open of ${tally.total} total`);
+    if (!Platform.isMobile) {
+      for (const { type, tally } of model.tallies) {
+        const stat = bar.createDiv({ cls: `wf-stat wf-t-${type}` });
+        stat.createSpan({ cls: "wf-swatch" });
+        stat.createSpan({ cls: "wf-stat-num", text: `${tally.open}/${tally.total}` });
+        stat.createSpan({ cls: "wf-stat-lbl", text: type === "map" ? "maps" : type });
+        stat.setAttr("aria-label", `${type}: ${tally.open} open of ${tally.total} total`);
+      }
     }
 
     const frontier = model.maps.flatMap((m) => m.tickets.filter((t) => t.frontier));
@@ -298,47 +313,93 @@ export class WayfinderView extends ItemView {
     const anyExpanded = model.maps.some(
       (m) => !(this.collapsedOverride.get(m.issue.number) ?? m.issue.state === "closed"),
     );
-    const foldBtn = right.createEl("button", {
-      cls: "wf-refresh",
-      attr: { "aria-label": anyExpanded ? "Collapse all maps" : "Expand all maps" },
-    });
-    setIcon(foldBtn, anyExpanded ? "chevrons-down-up" : "chevrons-up-down");
-    foldBtn.addEventListener("click", () => {
-      for (const m of model.maps) this.collapsedOverride.set(m.issue.number, anyExpanded);
-      this.render();
-    });
+    if (!Platform.isMobile) {
+      const foldBtn = right.createEl("button", {
+        cls: "wf-refresh",
+        attr: { "aria-label": anyExpanded ? "Collapse all maps" : "Expand all maps" },
+      });
+      setIcon(foldBtn, anyExpanded ? "chevrons-down-up" : "chevrons-up-down");
+      foldBtn.addEventListener("click", () => this.toggleAllMaps(model, anyExpanded));
 
-    const zoomOut = right.createEl("button", {
-      cls: "wf-refresh",
-      attr: { "aria-label": "Zoom out" },
-    });
-    setIcon(zoomOut, "zoom-out");
-    zoomOut.addEventListener("click", () => this.setZoom(this.zoom / 1.15));
-    const zoomLabel = right.createEl("button", {
-      cls: "wf-refresh wf-zoom-label",
-      text: `${Math.round(this.zoom * 100)}%`,
-      attr: { "aria-label": "Reset zoom" },
-    });
-    zoomLabel.addEventListener("click", () => this.setZoom(1));
-    const zoomIn = right.createEl("button", {
-      cls: "wf-refresh",
-      attr: { "aria-label": "Zoom in" },
-    });
-    setIcon(zoomIn, "zoom-in");
-    zoomIn.addEventListener("click", () => this.setZoom(this.zoom * 1.15));
+      const zoomOut = right.createEl("button", {
+        cls: "wf-refresh",
+        attr: { "aria-label": "Zoom out" },
+      });
+      setIcon(zoomOut, "zoom-out");
+      zoomOut.addEventListener("click", () => this.setZoom(this.zoom / 1.15));
+      const zoomLabel = right.createEl("button", {
+        cls: "wf-refresh wf-zoom-label",
+        text: `${Math.round(this.zoom * 100)}%`,
+        attr: { "aria-label": "Reset zoom" },
+      });
+      zoomLabel.addEventListener("click", () => this.setZoom(1));
+      const zoomIn = right.createEl("button", {
+        cls: "wf-refresh",
+        attr: { "aria-label": "Zoom in" },
+      });
+      setIcon(zoomIn, "zoom-in");
+      zoomIn.addEventListener("click", () => this.setZoom(this.zoom * 1.15));
 
-    const modeBtn = right.createEl("button", {
-      cls: "wf-refresh",
-      attr: { "aria-label": this.mode === "tree" ? "Switch to list view" : "Switch to tree view" },
-    });
-    setIcon(modeBtn, this.mode === "tree" ? "list" : "git-fork");
-    modeBtn.addEventListener("click", () => {
-      this.mode = this.mode === "tree" ? "list" : "tree";
-      this.render();
-    });
+      const modeBtn = right.createEl("button", {
+        cls: "wf-refresh",
+        attr: { "aria-label": this.mode === "tree" ? "Switch to list view" : "Switch to tree view" },
+      });
+      setIcon(modeBtn, this.mode === "tree" ? "list" : "git-fork");
+      modeBtn.addEventListener("click", () => this.toggleMode());
+    }
     const refresh = right.createEl("button", { cls: "wf-refresh", attr: { "aria-label": "Refresh now" } });
     setIcon(refresh, "refresh-cw");
     refresh.addEventListener("click", () => void this.plugin.sync(true));
+    if (Platform.isMobile) {
+      const overflow = right.createEl("button", {
+        cls: "wf-refresh",
+        text: "⋯",
+        attr: { "aria-label": "More Wayfinder controls" },
+      });
+      overflow.addEventListener("click", (e: MouseEvent) =>
+        this.showMobileTallyMenu(e, model, anyExpanded),
+      );
+    }
+  }
+
+  private toggleAllMaps(model: Model, anyExpanded: boolean): void {
+    for (const map of model.maps) this.collapsedOverride.set(map.issue.number, anyExpanded);
+    this.render();
+  }
+
+  private toggleMode(): void {
+    this.mode = this.mode === "tree" ? "list" : "tree";
+    this.render();
+  }
+
+  private showMobileTallyMenu(e: MouseEvent, model: Model, anyExpanded: boolean): void {
+    const menu = new Menu();
+    menu.addItem((item) =>
+      item
+        .setTitle(this.mode === "tree" ? "Switch to list view" : "Switch to tree view")
+        .setIcon(this.mode === "tree" ? "list" : "git-fork")
+        .onClick(() => this.toggleMode()),
+    );
+    menu.addItem((item) =>
+      item
+        .setTitle(anyExpanded ? "Collapse all maps" : "Expand all maps")
+        .setIcon(anyExpanded ? "chevrons-down-up" : "chevrons-up-down")
+        .onClick(() => this.toggleAllMaps(model, anyExpanded)),
+    );
+    menu.addItem((item) =>
+      item.setTitle("Zoom in").setIcon("zoom-in").onClick(() => this.setZoom(this.zoom * 1.15)),
+    );
+    menu.addItem((item) =>
+      item.setTitle("Zoom out").setIcon("zoom-out").onClick(() => this.setZoom(this.zoom / 1.15)),
+    );
+    menu.addItem((item) =>
+      item.setTitle("Reset zoom").setIcon("rotate-ccw").onClick(() => this.setZoom(1)),
+    );
+    menu.addSeparator();
+    for (const { type, tally } of model.tallies) {
+      menu.addItem((item) => item.setTitle(`${type} ${tally.open}/${tally.total}`).setDisabled(true));
+    }
+    menu.showAtMouseEvent(e);
   }
 
   // ── orphans ──────────────────────────────────────────────────────────────
@@ -370,7 +431,7 @@ export class WayfinderView extends ItemView {
     const section = root.createDiv({ cls: "wf-map-section" });
 
     const head = section.createDiv({ cls: "wf-mapcard" });
-    const chevron = head.createDiv({
+    const chevron = head.createEl("button", {
       cls: "wf-chevron",
       attr: { "aria-label": expanded ? "Collapse map" : "Expand map" },
     });
@@ -417,6 +478,7 @@ export class WayfinderView extends ItemView {
     }
 
     const scroller = section.createDiv({ cls: "wf-tree-scroll" });
+    scroller.dataset.mapNumber = String(map.issue.number);
     const tree = scroller.createDiv({ cls: "wf-tree" });
     tree.dataset.mapNumber = String(map.issue.number);
     const svg = tree.createSvg("svg", { cls: "wf-edges" });
