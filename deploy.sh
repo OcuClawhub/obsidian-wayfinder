@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 if [ -z "${VAULT:-}" ] && [ -f deploy.env ]; then source deploy.env; fi
 VAULT="${VAULT:?Set VAULT to your vault path (env var or deploy.env)}"
-DEST="$VAULT/.obsidian/plugins/wayfinder"
+DEST="$VAULT/.obsidian/plugins/wayfinder-maps"
 mkdir -p "$DEST"
 cp main.js manifest.json styles.css "$DEST/"
 touch "$DEST/.hotreload"

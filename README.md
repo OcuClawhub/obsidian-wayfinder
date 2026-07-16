@@ -1,4 +1,4 @@
-# Wayfinder for Obsidian
+# Wayfinder Maps for Obsidian
 
 Visualizes wayfinder maps from a GitHub repo's issues inside Obsidian: each `wayfinder:map` issue renders as a head card with its tickets arranged in a **dependency-layered tree** below it, drawn from GitHub's native issue-dependency (blocked-by) edges.
 
@@ -19,9 +19,9 @@ The wayfinder skill and methodology this plugin visualizes — maps, tickets, fr
 
 ## Setup
 
-1. Copy `main.js`, `manifest.json`, `styles.css` into `<vault>/.obsidian/plugins/wayfinder/` (or run `npm run deploy`), then enable **Wayfinder** in Settings → Community plugins.
+1. Copy `main.js`, `manifest.json`, `styles.css` into `<vault>/.obsidian/plugins/wayfinder-maps/` (or run `npm run deploy`), then enable **Wayfinder Maps** in Settings → Community plugins.
 2. Create a **fine-grained personal access token** (github.com → Settings → Developer settings → Fine-grained tokens) scoped to your repo with read-only **Issues** permission.
-3. Paste it in Settings → Wayfinder, set the repo (`owner/name`), and open the view via the compass ribbon icon or the "Open Wayfinder view" command.
+3. Paste it in Settings → Wayfinder Maps, set the repo (`owner/name`), and open the view via the compass ribbon icon or the "Open Wayfinder view" command.
 
 The view syncs when opened, re-polls every 2 minutes (configurable) while open, and syncs on window focus when stale. Commands cover **Open Wayfinder view**, **Sync now**, and **Copy /wayfinder for the next takeable ticket**. The manual refresh button forces a full relationship re-fetch. The token is stored in plain text in the vault's plugin `data.json`.
 

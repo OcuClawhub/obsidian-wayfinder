@@ -17,7 +17,7 @@ import {
 import { renderToolbar, type ToolbarControls, type ViewMode } from "./toolbar";
 import { drawAllEdges, renderTree } from "./tree";
 
-export const VIEW_TYPE_WAYFINDER = "wayfinder-view";
+export const VIEW_TYPE_WAYFINDER = "wayfinder-maps-view";
 
 const MODE_KEY = "wayfinder-view-mode";
 const ZOOM_KEY = "wayfinder-zoom";
