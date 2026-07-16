@@ -270,15 +270,28 @@ export class WayfinderView extends ItemView {
       stat.setAttr("aria-label", `${type}: ${tally.open} open of ${tally.total} total`);
     }
 
-    const takeable = model.maps.reduce(
-      (n, m) => n + m.tickets.filter((t) => t.frontier).length,
-      0,
+    const frontier = model.maps.flatMap((m) => m.tickets.filter((t) => t.frontier));
+    const chip = (cls: string, count: number, label: string, aria: string): void => {
+      const stat = bar.createDiv({ cls: `wf-stat ${cls}` });
+      stat.createSpan({ cls: "wf-swatch" });
+      stat.createSpan({ cls: "wf-stat-num", text: String(count) });
+      stat.createSpan({ cls: "wf-stat-lbl", text: label });
+      stat.setAttr("aria-label", aria);
+    };
+    chip(
+      "wf-t-frontier",
+      frontier.length,
+      "takeable",
+      `${frontier.length} tickets open, unblocked, and unclaimed`,
     );
-    const frontierStat = bar.createDiv({ cls: "wf-stat wf-t-frontier" });
-    frontierStat.createSpan({ cls: "wf-swatch" });
-    frontierStat.createSpan({ cls: "wf-stat-num", text: String(takeable) });
-    frontierStat.createSpan({ cls: "wf-stat-lbl", text: "takeable" });
-    frontierStat.setAttr("aria-label", `${takeable} tickets open, unblocked, and unclaimed`);
+    const hitl = frontier.filter((t) => t.mode === "HITL").length;
+    const afk = frontier.filter((t) => t.mode === "AFK").length;
+    const either = frontier.filter((t) => t.mode === "either").length;
+    chip("wf-t-hitl", hitl, "need you", `${hitl} takeable tickets need a human in the loop`);
+    chip("wf-t-afk", afk, "agent-ready", `${afk} takeable tickets an agent can run alone`);
+    if (either > 0) {
+      chip("wf-t-either", either, "either", `${either} takeable task tickets could go either way`);
+    }
 
     const right = bar.createDiv({ cls: "wf-tally-right" });
     right.createSpan({ cls: "wf-sync-status", text: this.syncStatusText() });

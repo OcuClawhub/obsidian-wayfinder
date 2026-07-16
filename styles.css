@@ -55,6 +55,11 @@
 .wf-refresh svg { width: 15px; height: 15px; }
 .wf-t-frontier { --tc: #3fb950; }
 .wf-t-frontier .wf-stat-num { color: #3fb950; }
+.wf-t-hitl { --tc: #ffb680; }
+.wf-t-hitl .wf-stat-num { color: #ffb680; }
+.wf-t-afk { --tc: #7ec8ff; }
+.wf-t-afk .wf-stat-num { color: #7ec8ff; }
+.wf-t-either { --tc: var(--text-faint); }
 
 /* ── orphans ── */
 .wf-orphans {
