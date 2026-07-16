@@ -1,17 +1,19 @@
 /**
- * Smoke test: runs the real fetch + model pipeline against the live repo
- * using plain fetch and a token from GH_TOKEN. Verifies the structural facts
- * we established by hand for map #429 (hermes release watcher).
+ * Smoke test: runs the real fetch + model pipeline against a live repo
+ * using plain fetch and a token from GH_TOKEN. Checks structural invariants
+ * that must hold for any wayfinder repo, and prints tallies, layers, and the
+ * frontier for eyeballing.
  *
- * Usage: GH_TOKEN=$(gh auth token) npm run smoke
+ * Usage: GH_TOKEN=$(gh auth token) SMOKE_REPO=owner/name npm run smoke
  */
 import { GitHubClient, fetchSnapshot, type Http } from "../src/github";
 import type { RepoConfig } from "../src/config";
 import { buildModel, type Snapshot } from "../src/model";
 
 const token = process.env.GH_TOKEN;
-if (!token) {
-  console.error("Set GH_TOKEN");
+const repo = process.env.SMOKE_REPO;
+if (!token || !repo?.includes("/")) {
+  console.error("Set GH_TOKEN and SMOKE_REPO=owner/name");
   process.exit(1);
 }
 
@@ -28,7 +30,7 @@ const http: Http = async (url, headers) => {
   };
 };
 
-const config: RepoConfig = { token, repo: "OcuClawhub/evenclaw" };
+const config: RepoConfig = { token, repo };
 const gh = new GitHubClient(() => config, http);
 
 const t0 = Date.now();
@@ -50,39 +52,62 @@ for (const { type, tally } of model.tallies) {
 }
 console.log(`  total: ${model.totalOpen}/${model.totalIssues}\n`);
 
-check("has at least 6 maps", model.maps.length >= 6);
-check("no orphans right now", model.orphans.length === 0);
+check("fetched at least one issue", snapshot.issues.length > 0);
+check("has at least one map", model.maps.length >= 1);
 
-const sdkRelay = model.maps.find((m) => m.issue.number === 368);
-check("map #368 (native sub-issues, no body links) has 17 tickets", sdkRelay?.total === 17);
+const allTickets = model.maps.flatMap((m) => m.tickets).concat(model.orphans);
+check(
+  "every frontier ticket is open, unassigned, unblocked, and verified",
+  allTickets
+    .filter((t) => t.frontier)
+    .every(
+      (t) =>
+        t.issue.state === "open" &&
+        t.issue.assignees.length === 0 &&
+        t.openBlockers.length === 0 &&
+        !t.unverified,
+    ),
+);
+check(
+  "every same-repo open blocker that is in the snapshot is actually open",
+  allTickets.every((t) =>
+    t.openBlockers.every((b) => {
+      if (b.repo) return true;
+      const issue = snapshot.issues.find((i) => i.number === b.number);
+      return !issue || issue.state === "open";
+    }),
+  ),
+);
+check(
+  "layering: no ticket sits above one of its in-map blockers",
+  model.maps.every((m) => {
+    const layerOf = new Map(m.tickets.map((t) => [t.issue.number, t.layer]));
+    return m.tickets.every((t) =>
+      t.blockedBy.every((b) => (layerOf.get(b) ?? -Infinity) <= t.layer),
+    );
+  }),
+);
+check(
+  "tallies add up to the wayfinder-labeled issue count",
+  model.tallies.reduce((sum, { tally }) => sum + tally.total, 0) ===
+    model.maps.length + allTickets.length,
+);
 
-const watcher = model.maps.find((m) => m.issue.number === 429);
-check("map #429 exists", !!watcher);
-if (watcher) {
-  check("#429 has 9 tickets", watcher.total === 9);
-  const t436 = watcher.tickets.find((t) => t.issue.number === 436);
-  check("#436 blockedBy includes 432,434,435,454",
-    !!t436 && [432, 434, 435, 454].every((n) => t436.blockedBy.includes(n)));
-  const t437 = watcher.tickets.find((t) => t.issue.number === 437);
-  const t435 = watcher.tickets.find((t) => t.issue.number === 435);
-  check("layering: 435 < 436 < 437",
-    !!t435 && !!t436 && !!t437 && t435.layer < t436.layer && t436.layer < t437.layer);
-  const t430 = watcher.tickets.find((t) => t.issue.number === 430);
-  check("#430 is research/AFK on layer 0",
-    !!t430 && t430.type === "research" && t430.mode === "AFK" && t430.layer === 0);
-  console.log("\n— #429 layers —");
-  watcher.layers.forEach((layer, i) =>
+const showcase = model.maps.find((m) => m.issue.state === "open" && m.total > 0) ?? model.maps[0];
+if (showcase) {
+  console.log(`\n— layers of "${showcase.issue.title}" (#${showcase.issue.number}) —`);
+  showcase.layers.forEach((layer, i) =>
     console.log(
       `  L${i}: ${layer
         .map((t) => `#${t.issue.number}${t.frontier ? "*" : ""}${t.issue.state === "closed" ? "✓" : ""}`)
         .join("  ")}`,
     ),
   );
-  console.log("\n— frontier across all maps —");
-  for (const m of model.maps) {
-    const f = m.tickets.filter((t) => t.frontier).map((t) => `#${t.issue.number} ${t.issue.title}`);
-    if (f.length) console.log(`  ${m.issue.title}\n    ${f.join("\n    ")}`);
-  }
+}
+console.log("\n— frontier across all maps —");
+for (const m of model.maps) {
+  const f = m.tickets.filter((t) => t.frontier).map((t) => `#${t.issue.number} ${t.issue.title}`);
+  if (f.length) console.log(`  ${m.issue.title}\n    ${f.join("\n    ")}`);
 }
 
 // Incremental sync: nothing changed, so zero dependency re-fetches.
@@ -95,6 +120,7 @@ const gh2 = new GitHubClient(() => config, countingHttp);
 await fetchSnapshot(gh2, snapshots[config.repo], false);
 check(`incremental sync makes 0 dependency calls (made ${depCalls})`, depCalls === 0);
 
+console.log(`\n${model.orphans.length} orphan(s)`);
 for (const o of model.orphans) {
   console.log(`ORPHAN #${o.issue.number} [${o.issue.state}] parent=${o.parent} — ${o.issue.title}`);
   console.log(`  body head: ${JSON.stringify((o.issue.body ?? "").slice(0, 120))}`);

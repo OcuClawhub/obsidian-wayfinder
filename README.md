@@ -32,5 +32,5 @@ npm install
 npm run dev      # watch build
 npm run build    # typecheck + production build
 npm run deploy   # build + copy into the vault (set VAULT via env or deploy.env)
-GH_TOKEN=$(gh auth token) npm run smoke   # run the data pipeline against the live repo
+GH_TOKEN=$(gh auth token) SMOKE_REPO=owner/name npm run smoke   # run the data pipeline against a live repo
 ```
