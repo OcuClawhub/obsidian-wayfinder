@@ -1,4 +1,4 @@
-import { ItemView, Menu, Platform, WorkspaceLeaf, setIcon } from "obsidian";
+import { ItemView, Menu, Notice, Platform, WorkspaceLeaf, setIcon } from "obsidian";
 import type { RawIssue } from "./model";
 import type WayfinderPlugin from "./main";
 import { TicketModal } from "./modal";
@@ -21,6 +21,9 @@ const ZOOM_MAX = 2;
 export class WayfinderView extends ItemView {
   /** Per-map collapse override; default is expanded for open maps, collapsed for closed. */
   private collapsedOverride = new Map<number, boolean>();
+  /** View-local delegation selection; never persisted. */
+  private selectionMode = false;
+  private selectedIssues = new Set<number>();
 
   /** Per-device (localStorage, not synced): phones default to list, desktops to tree. */
   private get mode(): ViewMode {
@@ -223,10 +226,15 @@ export class WayfinderView extends ItemView {
     this.lastRenderKey = this.snapshotKey();
     root.empty();
     root.addClass("wayfinder-view");
+    root.classList.toggle("wf-selecting", this.selectionMode);
     this.hoverCard?.remove();
     this.hoverCard = null;
     this.resizeObserver?.disconnect();
-    this.resizeObserver = new ResizeObserver(() => this.scheduleEdges());
+    this.resizeObserver = new ResizeObserver(() => {
+      this.scheduleEdges();
+      this.positionSelectBar();
+    });
+    this.resizeObserver.observe(root);
 
     const snapshot = this.plugin.snapshot;
     if (!snapshot) {
@@ -246,6 +254,7 @@ export class WayfinderView extends ItemView {
     }
 
     const model = buildModel(snapshot);
+    this.pruneSelection(model);
     this.renderTallyBar(root, model);
     if (this.plugin.lastError) {
       root.createDiv({ text: `Last sync failed: ${this.plugin.lastError}`, cls: "wf-error" });
@@ -254,6 +263,7 @@ export class WayfinderView extends ItemView {
     zoomWrap.style.setProperty("zoom", String(this.zoom));
     if (model.orphans.length > 0) this.renderOrphans(zoomWrap, model.orphans);
     for (const map of model.maps) this.renderMap(zoomWrap, map);
+    if (this.selectionMode) this.renderSelectBar(root, model);
 
     root.scrollTop = scrollTop;
     for (const scroller of Array.from(root.querySelectorAll<HTMLElement>(".wf-tree-scroll"))) {
@@ -314,6 +324,17 @@ export class WayfinderView extends ItemView {
       (m) => !(this.collapsedOverride.get(m.issue.number) ?? m.issue.state === "closed"),
     );
     if (!Platform.isMobile) {
+      const selectBtn = right.createEl("button", {
+        cls: `wf-refresh wf-select-toggle${this.selectionMode ? " is-active" : ""}`,
+        attr: {
+          "aria-label": this.selectionMode ? "Leave ticket selection mode" : "Select tickets",
+          "aria-pressed": String(this.selectionMode),
+        },
+      });
+      setIcon(selectBtn, "list-checks");
+      selectBtn.createSpan({ text: this.selectionMode ? "Selecting" : "Select" });
+      selectBtn.addEventListener("click", () => this.toggleSelectionMode());
+
       const foldBtn = right.createEl("button", {
         cls: "wf-refresh",
         attr: { "aria-label": anyExpanded ? "Collapse all maps" : "Expand all maps" },
@@ -372,8 +393,20 @@ export class WayfinderView extends ItemView {
     this.render();
   }
 
+  private toggleSelectionMode(): void {
+    this.selectionMode = !this.selectionMode;
+    this.render();
+  }
+
   private showMobileTallyMenu(e: MouseEvent, model: Model, anyExpanded: boolean): void {
     const menu = new Menu();
+    menu.addItem((item) =>
+      item
+        .setTitle(this.selectionMode ? "Done selecting tickets" : "Select tickets")
+        .setIcon("list-checks")
+        .onClick(() => this.toggleSelectionMode()),
+    );
+    menu.addSeparator();
     menu.addItem((item) =>
       item
         .setTitle(this.mode === "tree" ? "Switch to list view" : "Switch to tree view")
@@ -400,6 +433,87 @@ export class WayfinderView extends ItemView {
       menu.addItem((item) => item.setTitle(`${type} ${tally.open}/${tally.total}`).setDisabled(true));
     }
     menu.showAtMouseEvent(e);
+  }
+
+  private pruneSelection(model: Model): void {
+    const frontier = new Set(
+      model.maps.flatMap((map) =>
+        map.tickets.filter((ticket) => ticket.frontier).map((ticket) => ticket.issue.number),
+      ),
+    );
+    for (const number of this.selectedIssues) {
+      if (!frontier.has(number)) this.selectedIssues.delete(number);
+    }
+  }
+
+  private selectedTickets(model: Model): Ticket[] {
+    return model.maps.flatMap((map) =>
+      map.tickets.filter(
+        (ticket) => ticket.frontier && this.selectedIssues.has(ticket.issue.number),
+      ),
+    );
+  }
+
+  private toggleTicketSelection(ticket: Ticket): void {
+    if (this.selectedIssues.has(ticket.issue.number)) {
+      this.selectedIssues.delete(ticket.issue.number);
+    } else {
+      this.selectedIssues.add(ticket.issue.number);
+    }
+    this.render();
+  }
+
+  private renderSelectBar(root: HTMLElement, model: Model): void {
+    const selected = this.selectedTickets(model);
+    const bar = root.createDiv({ cls: "wf-selectbar" });
+    bar.createSpan({ cls: "wf-select-count", text: `${selected.length} selected` });
+
+    const commands = bar.createEl("button", { text: "Copy commands", cls: "mod-cta" });
+    commands.disabled = selected.length === 0;
+    commands.addEventListener("click", () => {
+      const text = selected
+        .map((ticket) => this.plugin.settings.copyTemplate.replace("{url}", ticket.issue.html_url))
+        .join("\n");
+      void navigator.clipboard.writeText(text).then(
+        () => new Notice(`Copied ${selected.length} commands`),
+        () => new Notice("Copy failed — clipboard unavailable"),
+      );
+    });
+
+    const checklist = bar.createEl("button", { text: "Copy checklist" });
+    checklist.disabled = selected.length === 0;
+    checklist.addEventListener("click", () => {
+      const text = selected
+        .map(
+          (ticket) =>
+            `- [ ] /wayfinder ${ticket.issue.html_url} — #${ticket.issue.number} ${ticket.issue.title} (${ticket.type}, ${ticket.mode})`,
+        )
+        .join("\n");
+      void navigator.clipboard.writeText(text).then(
+        () => new Notice(`Copied checklist (${selected.length} tickets)`),
+        () => new Notice("Copy failed — clipboard unavailable"),
+      );
+    });
+
+    const clear = bar.createEl("button", { text: "Clear" });
+    clear.disabled = selected.length === 0;
+    clear.addEventListener("click", () => {
+      this.selectedIssues.clear();
+      this.render();
+    });
+
+    const done = bar.createEl("button", { text: "Done" });
+    done.addEventListener("click", () => this.toggleSelectionMode());
+    this.positionSelectBar();
+  }
+
+  private positionSelectBar(): void {
+    const bar = this.contentEl.querySelector<HTMLElement>(".wf-selectbar");
+    if (!bar) return;
+    const rect = this.contentEl.getBoundingClientRect();
+    bar.style.left = `${rect.left + rect.width / 2}px`;
+    bar.style.bottom = `${Math.max(8, window.innerHeight - rect.bottom + 12)}px`;
+    bar.style.maxWidth = `${Math.max(0, rect.width - 32)}px`;
   }
 
   // ── orphans ──────────────────────────────────────────────────────────────
@@ -455,6 +569,27 @@ export class WayfinderView extends ItemView {
       cls: "wf-bar-fill",
       attr: { style: `width:${map.total ? Math.round((map.resolved / map.total) * 100) : 0}%` },
     });
+    const openTickets = map.tickets.filter((ticket) => ticket.issue.state === "open");
+    if (!isClosed && openTickets.length > 0) {
+      const takeable = openTickets.filter((ticket) => ticket.frontier).length;
+      const blocked = openTickets.filter(
+        (ticket) => ticket.unverified || ticket.openBlockers.length > 0,
+      ).length;
+      const claimed = openTickets.filter(
+        (ticket) =>
+          !ticket.unverified &&
+          ticket.openBlockers.length === 0 &&
+          ticket.issue.assignees.length > 0,
+      ).length;
+      const stats = [
+        takeable > 0 ? `${takeable} takeable` : "",
+        blocked > 0 ? `${blocked} blocked` : "",
+        claimed > 0 ? `${claimed} claimed` : "",
+      ].filter(Boolean);
+      if (stats.length > 0) {
+        headMain.createDiv({ cls: "wf-map-stats", text: stats.join(" · ") });
+      }
+    }
 
     if (this.changedSinceLastRender(map.issue)) head.addClass("wf-changed");
     this.addIconActions(head, map.issue, () =>
@@ -592,6 +727,10 @@ export class WayfinderView extends ItemView {
       card.addClass("wf-frontier");
       card.createSpan({ cls: "wf-frontier-flag", text: "FRONTIER" });
     }
+    if (this.selectionMode && t.frontier) {
+      card.setAttr("aria-pressed", String(this.selectedIssues.has(t.issue.number)));
+      if (this.selectedIssues.has(t.issue.number)) card.addClass("wf-selected");
+    }
 
     const row1 = card.createDiv({ cls: "wf-row1" });
     row1.createSpan({ cls: "wf-num", text: `#${t.issue.number}` });
@@ -600,22 +739,31 @@ export class WayfinderView extends ItemView {
 
     card.createDiv({ cls: "wf-ticket-title", text: t.issue.title });
 
-    const meta = card.createDiv({ cls: "wf-meta" });
+    let metaText: string;
     if (closed) {
-      meta.setText("✓ resolved");
+      metaText = "✓ resolved";
     } else if (t.unverified) {
-      meta.setText("⚠ blockers unverified");
+      metaText = "⚠ blockers unverified";
     } else if (blocked) {
-      meta.setText(`🔒 blocked by ${t.openBlockers.map((n) => `#${n}`).join(" ")}`);
+      metaText = `🔒 blocked by ${t.openBlockers.map((n) => `#${n}`).join(" ")}`;
     } else if (t.issue.assignees.length > 0) {
-      meta.setText(`● claimed by ${t.issue.assignees.join(", ")}`);
+      const idle = claimedIdleAge(t.issue.updated_at);
+      metaText = `● claimed by ${t.issue.assignees.join(", ")}${idle ? ` · idle ${idle}` : ""}`;
     } else {
-      meta.setText("● open · takeable now");
+      metaText = "● open · takeable now";
     }
+    if (!closed && t.downstreamImpact > 0) metaText += ` · unblocks ${t.downstreamImpact}`;
+    card.createDiv({ cls: "wf-meta", text: metaText });
 
     if (this.changedSinceLastRender(t.issue)) card.addClass("wf-changed");
     this.addIconActions(card, t.issue, undefined, t.frontier);
-    this.makeInteractive(card, () => new TicketModal(this.app, this.plugin, t, map).open());
+    this.makeInteractive(card, () => {
+      if (this.selectionMode && t.frontier) {
+        this.toggleTicketSelection(t);
+        return;
+      }
+      new TicketModal(this.app, this.plugin, t, map).open();
+    });
     this.attachHover(card, t, map);
   }
 
@@ -748,4 +896,11 @@ function relativeTime(ts: number): string {
   const h = Math.round(m / 60);
   if (h < 24) return `${h}h ago`;
   return `${Math.round(h / 24)}d ago`;
+}
+
+function claimedIdleAge(updatedAt: string): string | null {
+  const elapsed = Date.now() - Date.parse(updatedAt);
+  if (!Number.isFinite(elapsed) || elapsed <= 24 * 60 * 60 * 1000) return null;
+  const hours = Math.round(elapsed / (60 * 60 * 1000));
+  return hours < 24 ? `${hours}h` : `${Math.round(hours / 24)}d`;
 }

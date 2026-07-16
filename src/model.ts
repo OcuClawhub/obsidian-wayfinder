@@ -51,6 +51,7 @@ export interface Ticket {
   openBlockers: number[];
   unverified: boolean;
   frontier: boolean;
+  downstreamImpact: number;
   layer: number;
 }
 
@@ -136,6 +137,7 @@ export function buildModel(snap: Snapshot): Model {
         issue.state === "open" &&
         openBlockers.length === 0 &&
         issue.assignees.length === 0,
+      downstreamImpact: 0,
       layer: 0,
     });
   }
@@ -154,6 +156,7 @@ export function buildModel(snap: Snapshot): Model {
 
   const maps: MapTree[] = mapIssues.map((issue) => {
     const kids = (byMap.get(issue.number) ?? []).sort((a, b) => a.issue.number - b.issue.number);
+    assignDownstreamImpact(kids);
     assignLayers(kids);
     const layers: Ticket[][] = [];
     for (const t of kids) (layers[t.layer] ??= []).push(t);
@@ -195,6 +198,37 @@ export function buildModel(snap: Snapshot): Model {
     totalOpen,
     fetchedAt: snap.fetchedAt,
   };
+}
+
+/** Count unique open descendants in the map's inverted blocking graph. */
+function assignDownstreamImpact(tickets: Ticket[]): void {
+  const open = new Map(
+    tickets.filter((t) => t.issue.state === "open").map((t) => [t.issue.number, t]),
+  );
+  const dependents = new Map<number, number[]>();
+  for (const ticket of open.values()) {
+    for (const blocker of ticket.blockedBy) {
+      if (!open.has(blocker)) continue;
+      let blocked = dependents.get(blocker);
+      if (!blocked) dependents.set(blocker, (blocked = []));
+      blocked.push(ticket.issue.number);
+    }
+  }
+
+  for (const ticket of tickets) {
+    if (ticket.issue.state !== "open") {
+      ticket.downstreamImpact = 0;
+      continue;
+    }
+    const seen = new Set<number>([ticket.issue.number]);
+    const queue = [...(dependents.get(ticket.issue.number) ?? [])];
+    for (let number = queue.shift(); number !== undefined; number = queue.shift()) {
+      if (seen.has(number)) continue;
+      seen.add(number);
+      queue.push(...(dependents.get(number) ?? []));
+    }
+    ticket.downstreamImpact = seen.size - 1;
+  }
 }
 
 /** Longest-path layering over in-map blocking edges, with a cycle guard. */
