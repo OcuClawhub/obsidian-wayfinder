@@ -2,9 +2,6 @@ import { App, Notice, PluginSettingTab, Setting } from "obsidian";
 import { DEFAULT_SETTINGS } from "./config";
 import type WayfinderPlugin from "./main";
 
-export { DEFAULT_SETTINGS } from "./config";
-export type { RepoConfig, WayfinderSettings } from "./config";
-
 const TOKEN_DESCRIPTION =
   "Fine-grained personal access token with read-only Issues permission for the repo. " +
   "Create one at github.com → Settings → Developer settings → Fine-grained tokens. " +

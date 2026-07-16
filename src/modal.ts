@@ -51,8 +51,9 @@ export class TicketModal extends Modal {
       const action = (): void => {
         window.open(issue.html_url, "_blank");
       };
-      if (this.ticket?.frontier) void this.plugin.guardedAction(repo, issue.number, action);
-      else action();
+      if (this.ticket?.frontier) {
+        void this.plugin.guardedAction(repo, issue.number, action, "Open anyway");
+      } else action();
     });
 
     const map = this.map;

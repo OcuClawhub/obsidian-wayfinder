@@ -108,9 +108,9 @@ export function addIconActions(
     });
   }
 
-  const guarded = async (action: () => void): Promise<void> => {
+  const guarded = async (action: () => void, overrideLabel: string): Promise<void> => {
     if (claimCheck) {
-      await plugin.guardedAction(repo, issue.number, action);
+      await plugin.guardedAction(repo, issue.number, action, overrideLabel);
       return;
     }
     action();
@@ -123,7 +123,7 @@ export function addIconActions(
   setIcon(copy, "copy");
   copy.addEventListener("click", (event) => {
     event.stopPropagation();
-    void guarded(() => plugin.copyCommand(issue.html_url));
+    void guarded(() => plugin.copyCommand(issue.html_url), "Copy anyway");
   });
 
   const open = actions.createEl("a", {
@@ -136,7 +136,7 @@ export function addIconActions(
     event.stopPropagation();
     if (!claimCheck) return;
     event.preventDefault();
-    void guarded(() => window.open(issue.html_url, "_blank"));
+    void guarded(() => window.open(issue.html_url, "_blank"), "Open anyway");
   });
 }
 

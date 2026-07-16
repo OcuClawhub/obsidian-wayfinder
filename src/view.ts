@@ -185,8 +185,14 @@ export class WayfinderView extends ItemView {
     return this.plugin.settings.repos.map((config) => config.repo);
   }
 
+  /**
+   * Pure read: names not currently configured are ignored (not erased, so a
+   * re-added repo keeps its filter state), and with fewer than two repos the
+   * filter is moot — everything shows, since the filter button is hidden too.
+   */
   private get hiddenRepos(): Set<string> {
     const configuredRepos = this.configuredRepos;
+    if (configuredRepos.length < 2) return new Set();
     const configured = new Set(configuredRepos);
     let stored: unknown = [];
     try {
@@ -194,17 +200,11 @@ export class WayfinderView extends ItemView {
     } catch {
       // Invalid local state resets to showing every repository.
     }
-    const hidden = new Set(
+    return new Set(
       Array.isArray(stored)
         ? stored.filter((repo): repo is string => typeof repo === "string" && configured.has(repo))
         : [],
     );
-    if (configuredRepos.length < 2) hidden.clear();
-    const serialized = JSON.stringify([...hidden]);
-    if (window.localStorage.getItem(HIDDEN_REPOS_KEY) !== serialized) {
-      window.localStorage.setItem(HIDDEN_REPOS_KEY, serialized);
-    }
-    return hidden;
   }
 
   private get shownRepos(): string[] {
@@ -349,12 +349,12 @@ export class WayfinderView extends ItemView {
     }
 
     if (configuredRepos.length > 0 && this.shownRepos.length === 0) {
+      const model = mergeModels([]);
+      renderToolbar(root, model, this.toolbarControls(model));
       root.createDiv({
         cls: "wf-empty",
         text: "All repos hidden — use the repo filter to show one.",
       });
-      const model = mergeModels([]);
-      renderToolbar(root, model, this.toolbarControls(model));
       return;
     }
 

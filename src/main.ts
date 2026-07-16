@@ -43,7 +43,8 @@ export default class WayfinderPlugin extends Plugin {
   configError: string | null = null;
   private pendingSync: boolean | null = null;
 
-  fetchComments(repo: string, issueNumber: number): Promise<IssueComment[]> {
+  // Async so a missing repo config rejects instead of throwing into the caller.
+  async fetchComments(repo: string, issueNumber: number): Promise<IssueComment[]> {
     return this.clientForRepo(repo).comments(issueNumber);
   }
 
@@ -84,7 +85,12 @@ export default class WayfinderPlugin extends Plugin {
     return { status: "ok" };
   }
 
-  async guardedAction(repo: string, issueNumber: number, action: () => void): Promise<void> {
+  async guardedAction(
+    repo: string,
+    issueNumber: number,
+    action: () => void,
+    overrideLabel = "Copy anyway",
+  ): Promise<void> {
     const result = await this.verifyTakeable(repo, issueNumber);
     if (result.status === "ok") {
       action();
@@ -97,7 +103,7 @@ export default class WayfinderPlugin extends Plugin {
 
     const message = document.createDocumentFragment();
     message.appendText(`Couldn't verify #${issueNumber} is still takeable. `);
-    const override = message.createEl("button", { text: "Copy anyway", cls: "wf-notice-btn" });
+    const override = message.createEl("button", { text: overrideLabel, cls: "wf-notice-btn" });
     let notice: Notice;
     override.addEventListener("click", () => {
       action();
@@ -221,7 +227,11 @@ export default class WayfinderPlugin extends Plugin {
       if (!configured.has(repo)) delete this.errors[repo];
     }
 
-    const configs = this.settings.repos.filter(isValidRepoConfig);
+    // First entry wins when the same repo is configured twice — one fetch, one token.
+    const seen = new Set<string>();
+    const configs = this.settings.repos.filter(
+      (config) => isValidRepoConfig(config) && !seen.has(config.repo) && seen.add(config.repo),
+    );
     if (configs.length === 0) {
       this.configError = "Add a GitHub repo and token in Settings → Wayfinder.";
       await this.persist();
