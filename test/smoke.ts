@@ -16,7 +16,15 @@ if (!token) {
 
 const http: Http = async (url, headers) => {
   const res = await fetch(url, { headers });
-  return { status: res.status, json: await res.json().catch(() => null) };
+  const responseHeaders: Record<string, string> = {};
+  res.headers.forEach((value, key) => {
+    responseHeaders[key.toLowerCase()] = value;
+  });
+  return {
+    status: res.status,
+    headers: responseHeaders,
+    json: await res.json().catch(() => null),
+  };
 };
 
 const gh = new GitHubClient(() => ({ token, repo: "OcuClawhub/evenclaw" }), http);

@@ -8,6 +8,7 @@ import { wayfinderType } from "./model";
 
 export interface HttpResponse {
   status: number;
+  headers: Record<string, string>;
   json: unknown;
 }
 
@@ -20,8 +21,45 @@ export interface GitHubConfig {
 
 const API = "https://api.github.com";
 
+export function classifyError(status: number, headers: Record<string, string>): string {
+  if (status === 401) {
+    return "GitHub token is invalid or expired — replace it in Settings → Wayfinder.";
+  }
+  if (
+    (status === 403 || status === 429) &&
+    headers["x-ratelimit-remaining"]?.trim() === "0"
+  ) {
+    const resetSeconds = Number(headers["x-ratelimit-reset"]);
+    const resetTime = Number.isFinite(resetSeconds)
+      ? new Date(resetSeconds * 1000).toLocaleString()
+      : "an unknown time";
+    return `GitHub rate limit hit — resets at ${resetTime}.`;
+  }
+  if (status === 403) {
+    return "Token lacks permission for this repo (needs read-only Issues).";
+  }
+  if (status === 404) {
+    return "Repo not found (check owner/name) or token has no access to it.";
+  }
+  if (status >= 500 && status <= 599) {
+    return `GitHub is having problems (HTTP ${status}) — will retry on next sync.`;
+  }
+  return `GitHub request failed (HTTP ${status}).`;
+}
+
+export interface IssueListResult {
+  issues: RawIssue[];
+  truncated: boolean;
+}
+
 export class GitHubClient {
+  private dependencyErrorMessage: string | null = null;
+
   constructor(private config: () => GitHubConfig, private http: Http) {}
+
+  get repo(): string {
+    return this.config().repo;
+  }
 
   private headers(): Record<string, string> {
     return {
@@ -35,12 +73,13 @@ export class GitHubClient {
     return this.http(`${API}/repos/${this.config().repo}${path}`, this.headers());
   }
 
-  async listAllIssues(): Promise<RawIssue[]> {
+  async listAllIssues(): Promise<IssueListResult> {
     const issues: RawIssue[] = [];
-    for (let page = 1; page <= 20; page++) {
+    let truncated = false;
+    for (let page = 1; page <= 50; page++) {
       const res = await this.get(`/issues?state=all&per_page=100&page=${page}`);
       if (res.status !== 200) {
-        throw new Error(`GitHub issues list failed (HTTP ${res.status}) — check token and repo`);
+        throw new Error(classifyError(res.status, res.headers));
       }
       const batch = res.json as Record<string, unknown>[];
       for (const raw of batch) {
@@ -48,8 +87,15 @@ export class GitHubClient {
         issues.push(toRawIssue(raw));
       }
       if (batch.length < 100) break;
+      if (page === 50) truncated = true;
     }
-    return issues;
+    return { issues, truncated };
+  }
+
+  async testConnection(): Promise<string> {
+    const res = await this.get("");
+    if (res.status !== 200) throw new Error(classifyError(res.status, res.headers));
+    return (res.json as { full_name: string }).full_name;
   }
 
   /** Fetch a single issue fresh — used for pre-action claim checks. */
@@ -60,27 +106,60 @@ export class GitHubClient {
   }
 
   async blockedBy(issueNumber: number): Promise<number[] | null> {
-    const res = await this.get(`/issues/${issueNumber}/dependencies/blocked_by?per_page=100`);
-    if (res.status === 404) return [];
-    if (res.status !== 200) return null;
-    return (res.json as { number: number }[]).map((i) => i.number);
+    const issues: number[] = [];
+    for (let page = 1; page <= 10; page++) {
+      const res = await this.get(
+        `/issues/${issueNumber}/dependencies/blocked_by?per_page=100&page=${page}`,
+      );
+      if (res.status === 404) return [];
+      if (res.status !== 200) {
+        this.dependencyErrorMessage ??= classifyError(res.status, res.headers);
+        return null;
+      }
+      const batch = res.json as { number: number }[];
+      issues.push(...batch.map((i) => i.number));
+      if (batch.length < 100) break;
+    }
+    return issues;
   }
 
   async subIssues(issueNumber: number): Promise<number[] | null> {
-    const res = await this.get(`/issues/${issueNumber}/sub_issues?per_page=100`);
-    if (res.status === 404) return [];
-    if (res.status !== 200) return null;
-    return (res.json as { number: number }[]).map((i) => i.number);
+    const issues: number[] = [];
+    for (let page = 1; page <= 10; page++) {
+      const res = await this.get(`/issues/${issueNumber}/sub_issues?per_page=100&page=${page}`);
+      if (res.status === 404) return [];
+      if (res.status !== 200) return null;
+      const batch = res.json as { number: number }[];
+      issues.push(...batch.map((i) => i.number));
+      if (batch.length < 100) break;
+    }
+    return issues;
   }
 
   async comments(issueNumber: number): Promise<IssueComment[]> {
-    const res = await this.get(`/issues/${issueNumber}/comments?per_page=100`);
-    if (res.status !== 200) throw new Error(`HTTP ${res.status}`);
-    return (res.json as Record<string, unknown>[]).map((c) => ({
-      author: (c.user as { login: string } | null)?.login ?? "unknown",
-      createdAt: c.created_at as string,
-      body: (c.body as string | null) ?? "",
-    }));
+    const comments: IssueComment[] = [];
+    for (let page = 1; page <= 10; page++) {
+      const res = await this.get(`/issues/${issueNumber}/comments?per_page=100&page=${page}`);
+      if (res.status !== 200) throw new Error(classifyError(res.status, res.headers));
+      const batch = res.json as Record<string, unknown>[];
+      comments.push(
+        ...batch.map((c) => ({
+          author: (c.user as { login: string } | null)?.login ?? "unknown",
+          createdAt: c.created_at as string,
+          body: (c.body as string | null) ?? "",
+        })),
+      );
+      if (batch.length < 100) break;
+    }
+    return comments;
+  }
+
+  resetDependencyErrors(): void {
+    this.dependencyErrorMessage = null;
+  }
+
+  dependencyError(): string | null {
+    return this.dependencyErrorMessage;
   }
 }
 
@@ -112,8 +191,10 @@ export async function fetchSnapshot(
   gh: GitHubClient,
   prev: Snapshot | null,
   full: boolean,
+  onWarning?: (message: string) => void,
 ): Promise<Snapshot> {
-  const issues = await gh.listAllIssues();
+  const { issues, truncated } = await gh.listAllIssues();
+  if (truncated) onWarning?.("Repo has more than 5000 issues — view may be incomplete");
   const targets = issues.filter((i) => {
     const t = wayfinderType(i.labels);
     return t !== null && t !== "map";
@@ -147,11 +228,14 @@ export async function fetchSnapshot(
   });
 
   // Small concurrency pool — polite to the API, fast enough for ~60 tickets.
+  gh.resetDependencyErrors();
+  let dependencyFailures = 0;
   const queue = [...stale];
   const workers = Array.from({ length: 10 }, async () => {
     for (let issue = queue.shift(); issue; issue = queue.shift()) {
       const key = String(issue.number);
       const blockedBy = await gh.blockedBy(issue.number);
+      if (blockedBy === null) dependencyFailures++;
       deps[key] =
         blockedBy === null
           ? (prev?.deps[key] ?? { updatedAt: "", blockedBy: [], unverified: true })
@@ -160,5 +244,18 @@ export async function fetchSnapshot(
   });
   await Promise.all(workers);
 
-  return { fetchedAt: Date.now(), issues, deps, parents };
+  if (stale.length > 0 && dependencyFailures === stale.length) {
+    const message = gh.dependencyError();
+    if (message) onWarning?.(message);
+  }
+
+  const fetchedAt = Date.now();
+  return {
+    repo: gh.repo,
+    fetchedAt,
+    lastFullSync: full || !prev ? fetchedAt : prev.lastFullSync,
+    issues,
+    deps,
+    parents,
+  };
 }

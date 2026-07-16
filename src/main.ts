@@ -11,8 +11,34 @@ interface PersistedData {
 
 const obsidianHttp: Http = async (url, headers) => {
   const res = await requestUrl({ url, headers, throw: false });
-  return { status: res.status, json: res.json };
+  return {
+    status: res.status,
+    headers: Object.fromEntries(
+      Object.entries(res.headers).map(([key, value]) => [key.toLowerCase(), value]),
+    ),
+    json: res.json,
+  };
 };
+
+const FULL_SYNC_MAX_AGE = 24 * 60 * 60 * 1000;
+
+function sanitizeSettings(value: unknown): WayfinderSettings {
+  const raw = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  let interval = DEFAULT_SETTINGS.pollIntervalMinutes;
+  try {
+    const coerced = Number(raw.pollIntervalMinutes);
+    if (Number.isFinite(coerced)) interval = Math.min(120, Math.max(0.5, coerced));
+  } catch {
+    // Keep the default for values that cannot be converted to a number.
+  }
+  return {
+    token: typeof raw.token === "string" ? raw.token : DEFAULT_SETTINGS.token,
+    repo: typeof raw.repo === "string" ? raw.repo : DEFAULT_SETTINGS.repo,
+    pollIntervalMinutes: interval,
+    copyTemplate:
+      typeof raw.copyTemplate === "string" ? raw.copyTemplate : DEFAULT_SETTINGS.copyTemplate,
+  };
+}
 
 export default class WayfinderPlugin extends Plugin {
   settings: WayfinderSettings = { ...DEFAULT_SETTINGS };
@@ -20,6 +46,7 @@ export default class WayfinderPlugin extends Plugin {
   events = new Events();
   syncing = false;
   lastError: string | null = null;
+  private pendingSync: boolean | null = null;
   private github = new GitHubClient(
     () => ({ token: this.settings.token, repo: this.settings.repo }),
     obsidianHttp,
@@ -27,6 +54,10 @@ export default class WayfinderPlugin extends Plugin {
 
   fetchComments(issueNumber: number): Promise<IssueComment[]> {
     return this.github.comments(issueNumber);
+  }
+
+  testConnection(): Promise<string> {
+    return this.github.testConnection();
   }
 
   /** Live-check an open, unclaimed ticket right before acting on it. */
@@ -99,8 +130,14 @@ export default class WayfinderPlugin extends Plugin {
 
   async onload(): Promise<void> {
     const data = ((await this.loadData()) ?? {}) as Partial<PersistedData>;
-    this.settings = { ...DEFAULT_SETTINGS, ...data.settings };
-    this.snapshot = data.snapshot ?? null;
+    this.settings = sanitizeSettings(data.settings);
+    const loadedSnapshot = data.snapshot ?? null;
+    this.snapshot =
+      loadedSnapshot &&
+      ((loadedSnapshot as Partial<Snapshot>).repo === undefined ||
+        loadedSnapshot.repo === this.settings.repo)
+        ? loadedSnapshot
+        : null;
 
     this.registerView(VIEW_TYPE_WAYFINDER, (leaf) => new WayfinderView(leaf, this));
     this.addRibbonIcon("compass", "Open Wayfinder", () => this.activateView());
@@ -136,25 +173,51 @@ export default class WayfinderPlugin extends Plugin {
 
   /** Sync from GitHub. `full` re-fetches every dependency edge. */
   async sync(full = false): Promise<void> {
-    if (this.syncing) return;
-    if (!this.settings.token || !this.settings.repo.includes("/")) {
-      this.lastError = "Set a GitHub token and repo in Settings → Wayfinder.";
-      this.events.trigger("wayfinder:updated");
+    if (this.syncing) {
+      this.pendingSync = (this.pendingSync ?? false) || full;
       return;
     }
     this.syncing = true;
     this.events.trigger("wayfinder:updated");
     try {
-      this.snapshot = await fetchSnapshot(this.github, this.snapshot, full);
-      this.lastError = null;
-      await this.persist();
-    } catch (e) {
-      this.lastError = e instanceof Error ? e.message : String(e);
-      new Notice(`Wayfinder sync failed: ${this.lastError}`);
+      let requestedFull: boolean | null = full;
+      while (requestedFull !== null) {
+        this.pendingSync = null;
+        await this.runSync(requestedFull);
+        requestedFull = this.pendingSync;
+      }
     } finally {
       this.syncing = false;
       this.events.trigger("wayfinder:updated");
     }
+  }
+
+  private async runSync(requestedFull: boolean): Promise<void> {
+    const config = { token: this.settings.token, repo: this.settings.repo };
+    if (!config.token || !config.repo.includes("/")) {
+      this.lastError = "Set a GitHub token and repo in Settings → Wayfinder.";
+      this.events.trigger("wayfinder:updated");
+      return;
+    }
+
+    const prev = this.snapshot?.repo === config.repo ? this.snapshot : null;
+    const full =
+      requestedFull ||
+      !prev?.lastFullSync ||
+      Date.now() - prev.lastFullSync >= FULL_SYNC_MAX_AGE;
+    const github = new GitHubClient(() => config, obsidianHttp);
+    let warning: string | null = null;
+    try {
+      this.snapshot = await fetchSnapshot(github, prev, full, (message) => {
+        warning = message;
+      });
+      this.lastError = warning;
+      await this.persist();
+    } catch (e) {
+      this.lastError = e instanceof Error ? e.message : String(e);
+      new Notice(`Wayfinder sync failed: ${this.lastError}`);
+    }
+    this.events.trigger("wayfinder:updated");
   }
 
   private settingsSyncTimer: number | null = null;

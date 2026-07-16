@@ -33,7 +33,9 @@ export interface DepEntry {
 }
 
 export interface Snapshot {
+  repo: string;
   fetchedAt: number;
+  lastFullSync?: number;
   issues: RawIssue[];
   deps: Record<string, DepEntry>;
   /** child issue number -> map issue number, from GitHub native sub-issues */

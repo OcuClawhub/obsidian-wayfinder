@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting } from "obsidian";
+import { App, Notice, PluginSettingTab, Setting } from "obsidian";
 import type WayfinderPlugin from "./main";
 
 export interface WayfinderSettings {
@@ -57,13 +57,27 @@ export class WayfinderSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Test connection")
+      .setDesc("Check that the token can access this repository.")
+      .addButton((button) =>
+        button.setButtonText("Test connection").onClick(async () => {
+          try {
+            const fullName = await this.plugin.testConnection();
+            new Notice(`Connected: ${fullName} (issues readable)`);
+          } catch (e) {
+            new Notice(e instanceof Error ? e.message : String(e));
+          }
+        }),
+      );
+
+    new Setting(containerEl)
       .setName("Sync interval (minutes)")
       .setDesc("How often the view re-syncs while it is open. Manual refresh is always available.")
       .addText((text) =>
         text.setValue(String(this.plugin.settings.pollIntervalMinutes)).onChange(async (value) => {
           const n = Number(value);
-          if (Number.isFinite(n) && n >= 0.5) {
-            this.plugin.settings.pollIntervalMinutes = n;
+          if (Number.isFinite(n)) {
+            this.plugin.settings.pollIntervalMinutes = Math.min(120, Math.max(0.5, n));
             await this.plugin.saveSettings();
           }
         }),
